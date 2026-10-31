@@ -195,7 +195,8 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const pathname = decodeURIComponent(url.pathname);
-    let filePath = resolve(distRoot, `.${pathname === '/' ? '/index.html' : pathname}`);
+    const assetPath = pathname.startsWith('/vcmik3/') ? pathname.slice('/vcmik3'.length) : pathname;
+    let filePath = resolve(distRoot, `.${assetPath === '/' ? '/index.html' : assetPath}`);
     if (filePath !== distRoot && !filePath.startsWith(`${distRoot}${sep}`)) {
       response.writeHead(403).end('Forbidden');
       return;
@@ -213,7 +214,7 @@ try {
   await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Static test server did not start');
-  const applicationUrl = `http://127.0.0.1:${address.port}/`;
+  const applicationUrl = `http://127.0.0.1:${address.port}/vcmik3/`;
   chrome = spawn(chromePath, [
     '--headless=new',
     '--remote-debugging-port=0',
