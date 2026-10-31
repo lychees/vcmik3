@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Test output
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+.browser-smoke-*/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Caches
+.cache/
+.vite/
+.parcel-cache/
+.turbo/
+.eslintcache
+*.tsbuildinfo
+
+# Local environments and toolchains
+.env
+.env.*
+!.env.example
+.direnv/
+.tower/
+.vscode/
+.idea/
+.fleet/
+.history/
+
+# OS files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Legacy reference material
+/BV1AdJD6iEfw-game/
