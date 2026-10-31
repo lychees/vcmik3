@@ -47,7 +47,7 @@ export class GameApplication {
           <ul class="h3-onboarding-roster" aria-label="${ROSTER_COUNTS.factions} faction roster">${factionRoster}</ul>
           <ol class="h3-onboarding-steps">
             <li><strong>Explore</strong><span>Select your hero and choose a highlighted tile. Collect treasure and claim mines.</span></li>
-            <li><strong>Build</strong><span>Visit Aster Keep or Cinder Bastion, then develop any captured faction’s four-tier town chain.</span></li>
+            <li><strong>Build</strong><span>Enter any friendly town and select its faction-specific 3D buildings to construct, recruit, manage armies, or review the visiting hero’s spells.</span></li>
             <li><strong>Conquer</strong><span>Engage hostile forces on a 3D battlefield and capture every enemy town in the current campaign.</span></li>
           </ol>
           <label class="h3-onboarding-seed" for="h3-seed">Campaign seed</label>

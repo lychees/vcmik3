@@ -9,6 +9,22 @@ const distRoot = resolve(projectRoot, 'dist');
 const chromePath = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
+const factionTownFixtures = [
+  { id: 'haven', name: 'Aster Keep', buildings: ['militiaBarracks', 'archeryRange', 'griffinTower', 'joustingArena'], creatures: ['militia', 'archer', 'griffin', 'cavalier'] },
+  { id: 'grove', name: 'Lunar Glade', buildings: ['spriteGlade', 'rangerLodge', 'unicornGrove', 'dragonCliffs'], creatures: ['sprite', 'ranger', 'unicorn', 'dragon'] },
+  { id: 'ember', name: 'Cinder Bastion', buildings: ['impWarrens', 'hellhoundKennels', 'ifritSpire', 'pitFiendAbyss'], creatures: ['imp', 'hellhound', 'ifrit', 'pitFiend'] },
+  { id: 'mire', name: 'Sunken Fen', buildings: ['lizardmanDen', 'gorgonPen', 'wyvernRoost', 'basiliskPit'], creatures: ['lizardman', 'gorgon', 'wyvern', 'basilisk'] },
+  { id: 'tower', name: 'Astral Spire', buildings: ['gremlinWorkshop', 'gargoyleParapet', 'geniePavilion', 'titanCloudTemple'], creatures: ['gremlin', 'stoneGargoyle', 'genie', 'titan'] },
+  { id: 'necropolis', name: 'Veil of Souls', buildings: ['skeletonCrypt', 'zombieGraveyard', 'vampireEstate', 'ghostDragonSepulcher'], creatures: ['skeleton', 'zombie', 'vampire', 'ghostDragon'] },
+  { id: 'dungeon', name: 'Obsidian Depths', buildings: ['troglodyteWarrens', 'harpyRoost', 'minotaurLabyrinth', 'redDragonCavern'], creatures: ['troglodyte', 'harpy', 'minotaur', 'redDragon'] },
+  { id: 'stronghold', name: 'Thunder Bastion', buildings: ['goblinBarracks', 'wolfPen', 'ogreFort', 'behemothCliffs'], creatures: ['goblin', 'wolfRider', 'ogre', 'behemoth'] },
+  { id: 'conflux', name: 'Elemental Nexus', buildings: ['pixieGarden', 'airElementalAltar', 'stormElementalSpire', 'phoenixPyre'], creatures: ['pixie', 'airElemental', 'stormElemental', 'phoenix'] },
+  { id: 'cove', name: 'Tidehaven', buildings: ['nymphGrotto', 'corsairTavern', 'seaWitchTower', 'seaSerpentCove'], creatures: ['nymph', 'corsair', 'seaWitch', 'seaSerpent'] },
+  { id: 'factory', name: 'Brasswork Bastion', buildings: ['halflingHovels', 'automatonAssembly', 'dreadnoughtFoundry', 'juggernautHangar'], creatures: ['halfling', 'automaton', 'dreadnought', 'juggernaut'] },
+  { id: 'bulwark', name: 'Reedwall Refuge', buildings: ['banditHideout', 'hornetNest', 'shamanLodge', 'alligatorPit'], creatures: ['bandit', 'hornet', 'shaman', 'alligator'] },
+  { id: 'courtyard', name: 'Rose Court', buildings: ['pageBarracks', 'duelistSalon', 'courtWizardLibrary', 'royalLionGarden'], creatures: ['page', 'duelist', 'courtWizard', 'royalLion'] },
+];
+
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
@@ -81,12 +97,13 @@ class CdpClient {
     return new CdpClient(socket);
   }
 
-  send(method, params = {}, timeout = 30000) {
+  send(method, params = {}, timeout = 60000) {
     const id = this.nextId++;
     return new Promise((resolveSend, rejectSend) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        rejectSend(new Error(`DevTools command timed out: ${method}`));
+        const expression = typeof params.expression === 'string' ? `: ${params.expression.slice(0, 300)}` : '';
+        rejectSend(new Error(`DevTools command timed out: ${method}${expression}`));
       }, timeout);
       this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timer });
       this.socket.send(JSON.stringify({ id, method, params }));
@@ -152,11 +169,11 @@ class CdpClient {
     })()`);
   }
 
-  async key(selector, key) {
+  async key(selector, key, modifiers = {}) {
     await this.evaluate(`(() => {
       const element = document.querySelector(${JSON.stringify(selector)});
       if (!element) throw new Error('Missing keyboard target: ${selector}');
-      element.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, ...${JSON.stringify(modifiers)} }));
       return true;
     })()`);
   }
@@ -180,6 +197,18 @@ class CdpClient {
     })()`);
   }
 
+  async mouse(type, x, y, extra = {}) {
+    await this.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', ...extra });
+  }
+
+  async constructBuilding(buildingId) {
+    await this.click(`[data-building-card="${buildingId}"] [data-action="construct-building"]`);
+    await this.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('One project per day')");
+    await this.assert(`document.querySelector('.h3-town-scene__building[data-building-id="${buildingId}"]').dataset.built === 'false'`, 'Construction happened before confirmation');
+    await this.clickText('.h3-dialog-actions button', 'Construct building');
+    await this.waitFor(`document.querySelector('[data-building-card="${buildingId}"] .h3-status-badge')?.textContent === 'Built'`);
+  }
+
   close() {
     this.socket.close();
   }
@@ -195,8 +224,16 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const pathname = decodeURIComponent(url.pathname);
-    const assetPath = pathname.startsWith('/vcmik3/') ? pathname.slice('/vcmik3'.length) : pathname;
-    let filePath = resolve(distRoot, `.${assetPath === '/' ? '/index.html' : assetPath}`);
+    if (pathname === '/') {
+      response.writeHead(302, { Location: '/vcmik3/' }).end();
+      return;
+    }
+    if (!pathname.startsWith('/vcmik3/')) {
+      response.writeHead(404).end('Not found');
+      return;
+    }
+    const relativePath = pathname.slice('/vcmik3/'.length) || 'index.html';
+    let filePath = resolve(distRoot, relativePath);
     if (filePath !== distRoot && !filePath.startsWith(`${distRoot}${sep}`)) {
       response.writeHead(403).end('Forbidden');
       return;
@@ -223,7 +260,7 @@ try {
     '--no-default-browser-check',
     '--disable-background-networking',
     '--disable-component-update',
-    '--use-angle=swiftshader',
+    `--use-angle=${process.env.H3_CHROME_ANGLE ?? 'swiftshader'}`,
     '--enable-unsafe-swiftshader',
     '--window-size=1440,1000',
     applicationUrl,
@@ -249,7 +286,7 @@ try {
 
   console.log('Browser smoke: onboarding and new campaign');
   await client.waitFor("document.readyState === 'complete' && document.querySelector('#h3-onboarding:not([hidden])')");
-  await client.assert("document.title.includes('Aster Vale')", 'Production entry point is not Aster Vale');
+  await client.assert("document.title.includes('Aster Vale') && location.pathname === '/vcmik3/'", 'Production H3 entry or /vcmik3/ base path is incorrect');
   await client.assert("document.querySelectorAll('.h3-onboarding-roster li').length === 13", 'Onboarding does not show all 13 factions');
   await client.assert("document.querySelector('.h3-onboarding')?.textContent.includes('52 units') && document.querySelector('.h3-onboarding')?.textContent.includes('64 × 48')", 'Onboarding roster or enlarged-map counts are stale');
   await client.setValue('#h3-seed', 'browser-smoke');
@@ -282,19 +319,52 @@ try {
   await client.click('[data-action="previous-hero"]');
   await client.waitFor("document.querySelector('.h3-hero-panel')?.textContent.includes('Aveline')");
 
-  console.log('Browser smoke: hero movement and town construction/recruitment');
+  console.log('Browser smoke: WebGL town picking, construction confirmation, model updates, and recruitment');
   await client.key('.h3-minimap', 'ArrowDown');
   await client.key('.h3-minimap', 'ArrowDown');
   await client.key('.h3-minimap', 'Enter');
-  await client.waitFor("document.querySelector('.h3-town-screen')?.textContent.includes('Aster Keep')");
-  await client.click('[data-town-tab="construction"]');
-  await client.click('[data-building-id="archeryRange"]');
-  await client.waitFor("document.querySelector('[data-building-id=\"archeryRange\"]')?.textContent.includes('Constructed')");
-  await client.click('[data-town-tab="recruitment"]');
-  await client.waitFor("document.querySelector('[data-creature-card=\"archer\"]')");
+  await client.waitFor("document.querySelector('.h3-town-screen')?.textContent.includes('Aster Keep') && document.querySelector('.h3-town-scene')?.dataset.buildingCount === '9'");
+  await client.assert(`(() => {
+    const canvas = document.querySelector('.h3-town-scene canvas');
+    window.__townSmokeCanvas = canvas;
+    return canvas.getContext('webgl2') !== null;
+  })()`, 'Integrated town did not create a real WebGL2 context');
+  const townHallPoint = await client.evaluate(`(() => {
+    const label = document.querySelector('.h3-town-scene__label[data-building-id="townHall"]');
+    const bounds = label.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.bottom };
+  })()`);
+  let townHallActivated = false;
+  for (const offset of [8, 22, 38, 58, 82]) {
+    const x = townHallPoint.x;
+    const y = townHallPoint.y + offset;
+    await client.mouse('mouseMoved', x, y, { button: 'none' });
+    await delay(70);
+    if (!await client.evaluate("!document.querySelector('.h3-town-scene__tooltip').hidden")) continue;
+    await client.mouse('mousePressed', x, y, { clickCount: 1 });
+    await client.mouse('mouseReleased', x, y, { clickCount: 1 });
+    try {
+      await client.waitFor("document.querySelector('[data-overview-building=\"townHall\"]')?.classList.contains('is-focused')", 1000);
+      townHallActivated = true;
+      break;
+    } catch { }
+  }
+  if (!townHallActivated) throw new Error('Could not activate the integrated Town Hall through WebGL raycasting');
+  await client.click('.h3-town-scene__building[data-building-id="archeryRange"]');
+  await client.waitFor("document.querySelector('[data-building-card=\"archeryRange\"]')?.classList.contains('is-focused')");
+  await client.assert("document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'false' && !document.querySelector('.h3-dialog[open]')", 'Unbuilt model click bypassed construction');
+  await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas", 'Tab routing recreated the town WebGL canvas');
+  await client.constructBuilding('archeryRange');
+  await client.waitFor("document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true'");
+  await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas", 'Construction recreated rather than updated the town scene');
+  await client.click('.h3-town-scene__building[data-building-id="archeryRange"]');
+  await client.waitFor("document.querySelector('[data-creature-card=\"archer\"]')?.classList.contains('is-focused')");
   await client.setValue('[data-creature-card="archer"] [data-recruit-input]', '2');
   await client.click('[data-creature-card="archer"] [data-action="recruit-creature"]');
   await client.waitFor("document.querySelector('[data-creature-card=\"archer\"] .h3-recruit-available strong')?.textContent.trim() === '7'");
+  await client.click('.h3-town-scene__building[data-building-id="fort"]');
+  await client.waitFor("document.querySelector('.h3-army-management') && document.querySelector('[data-town-tab=\"army\"]').getAttribute('aria-pressed') === 'true'");
+  await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas", 'Army routing recreated the town scene');
 
   console.log('Browser smoke: save and turn advancement');
   await client.click('[data-action="town-exit"]');
@@ -321,7 +391,7 @@ try {
   await client.waitFor("document.querySelector('.h3-calendar')?.textContent.includes('Day 1') && !document.querySelector('.h3b-root')");
   await client.click('[data-action="enter-town"]');
   await client.click('[data-town-tab="construction"]');
-  await client.assert("document.querySelector('[data-building-id=\"archeryRange\"]')?.textContent.includes('Constructed')", 'Loaded save lost town construction');
+  await client.assert("document.querySelector('[data-building-card=\"archeryRange\"] .h3-status-badge')?.textContent === 'Built' && document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true'", 'Loaded save lost town construction or its model state');
   await client.click('[data-town-tab="recruitment"]');
   await client.assert("document.querySelector('[data-creature-card=\"archer\"] .h3-recruit-available strong')?.textContent.trim() === '7'", 'Loaded save lost recruitment state');
   await client.click('[data-action="town-exit"]');
@@ -356,6 +426,7 @@ try {
     const hero = state.heroes['hero-aveline'];
     if (!town || !hero) throw new Error('Missing Tower acceptance fixtures');
     town.ownerId = 'red';
+    if (!town.buildings.includes('mageGuild')) town.buildings.push('mageGuild');
     hero.position = { ...town.position };
     hero.movementPoints = hero.maxMovementPoints;
     hero.alive = true;
@@ -370,13 +441,17 @@ try {
   await client.waitFor("document.querySelector('#h3-onboarding').hidden && document.querySelector('.h3-hero-panel')?.textContent.includes('Aveline')");
   await client.assert("document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns · 13 factions · 52 units')", 'Loaded campaign lost the enlarged roster');
   await client.click('.h3-command-bar [data-action="enter-town"]');
-  await client.waitFor("document.querySelector('.h3-town-screen')?.textContent.includes('Astral Spire')");
+  await client.waitFor("document.querySelector('.h3-town-screen')?.textContent.includes('Astral Spire') && document.querySelector('.h3-town-scene')?.dataset.buildingCount === '9'");
   await client.assert("document.querySelector('.h3-town-screen')?.dataset.faction === 'Tower'", 'Tower town has the wrong faction presentation');
-  await client.click('[data-town-tab="construction"]');
-  await client.click('[data-building-id="gargoyleParapet"]');
-  await client.waitFor("document.querySelector('[data-building-id=\"gargoyleParapet\"]')?.textContent.includes('Constructed')");
-  await client.click('[data-town-tab="recruitment"]');
-  await client.waitFor("document.querySelector('[data-creature-card=\"stoneGargoyle\"]')");
+  await client.click('.h3-town-scene__building[data-building-id="mageGuild"]');
+  await client.waitFor("document.querySelector('[data-spellbook=\"ready\"]') && document.querySelector('[data-spell-id=\"magicArrow\"]') && document.querySelector('[data-spell-id=\"haste\"]')");
+  await client.assert("document.querySelector('.h3-spellbook-hero')?.textContent.includes('Aveline')", 'Mage Guild did not open the visiting hero spellbook');
+  await client.click('.h3-town-scene__building[data-building-id="gargoyleParapet"]');
+  await client.waitFor("document.querySelector('[data-building-card=\"gargoyleParapet\"]')?.classList.contains('is-focused')");
+  await client.constructBuilding('gargoyleParapet');
+  await client.waitFor("document.querySelector('.h3-town-scene__building[data-building-id=\"gargoyleParapet\"]').dataset.built === 'true'");
+  await client.click('.h3-town-scene__building[data-building-id="gargoyleParapet"]');
+  await client.waitFor("document.querySelector('[data-creature-card=\"stoneGargoyle\"]')?.classList.contains('is-focused')");
   await client.setValue('[data-creature-card="stoneGargoyle"] [data-recruit-input]', '2');
   await client.click('[data-creature-card="stoneGargoyle"] [data-action="recruit-creature"]');
   await client.waitFor("document.querySelector('[data-creature-card=\"stoneGargoyle\"] .h3-recruit-available strong')?.textContent.trim() === '7'");
@@ -392,18 +467,19 @@ try {
   await client.click('[data-town-tab="army"]');
   await client.click('[data-creature-id="stoneGargoyle"][data-direction="toHero"][data-all="true"]');
   await client.waitFor("document.querySelector('.h3-transfer-columns > section:last-child')?.textContent.includes('Stone Gargoyle')");
-  await client.click('[data-action="town-exit"]');
-  await client.click('.h3-command-bar [data-action="game-menu"]');
+  await client.key('.h3-town-scene canvas', 'o', { ctrlKey: true });
+  await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('Campaign journal')");
   await client.click('[data-save="slot-2"]');
-  await client.waitFor("document.querySelector('.h3-toasts')?.textContent.includes('Campaign saved')");
-  await client.click('.h3-command-bar [data-action="game-menu"]');
+  await client.waitFor("document.querySelector('.h3-toasts')?.textContent.includes('Campaign saved') && document.querySelector('.h3-town-scene')");
+  await client.key('.h3-town-scene canvas', 'o', { ctrlKey: true });
+  await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('Campaign journal')");
   await client.click('[data-load="slot-2"]');
   await client.waitFor("document.querySelector('.h3-dialog')?.textContent.includes('Load saved campaign?')");
   await client.clickText('.h3-dialog-actions button', 'Load campaign');
-  await client.waitFor("!document.querySelector('.h3-dialog[open]') && document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns')");
+  await client.waitFor("!document.querySelector('.h3-dialog[open]') && !document.querySelector('.h3-town-scene') && document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns')");
   await client.click('[data-action="enter-town"]');
   await client.click('[data-town-tab="construction"]');
-  await client.assert("document.querySelector('[data-building-id=\"gargoyleParapet\"]')?.textContent.includes('Constructed')", '13-town save lost Tower construction');
+  await client.assert("document.querySelector('[data-building-card=\"gargoyleParapet\"] .h3-status-badge')?.textContent === 'Built' && document.querySelector('.h3-town-scene__building[data-building-id=\"gargoyleParapet\"]').dataset.built === 'true'", '13-town save lost Tower construction or its model state');
   await client.click('[data-town-tab="recruitment"]');
   await client.assert("document.querySelector('[data-creature-card=\"stoneGargoyle\"] .h3-recruit-available strong')?.textContent.trim() === '7'", '13-town save lost Tower recruitment');
   await client.click('[data-action="town-exit"]');
@@ -429,12 +505,76 @@ try {
   await client.click('[data-action="complete"]');
   await client.waitFor("!document.querySelector('.h3b-root') && !document.querySelector('[data-testid=\"adventure-layer\"]').hidden");
 
+  console.log('Browser smoke: every faction pack, building interaction, recruitment, and desktop/mobile WebGL layout');
+  for (const faction of factionTownFixtures) {
+    await client.evaluate(`(() => {
+      const fixture = ${JSON.stringify(faction)};
+      const key = 'h3core.save.v1.autosave';
+      const state = JSON.parse(localStorage.getItem(key));
+      const town = state.towns[fixture.id];
+      const hero = state.heroes['hero-aveline'];
+      if (!town || !hero) throw new Error('Missing faction acceptance fixture: ' + fixture.id);
+      town.ownerId = 'red';
+      town.buildings = ['townHall', 'capitol', 'market', 'fort', 'mageGuild', ...fixture.buildings];
+      town.dwellingPools = Object.fromEntries(fixture.creatures.map((id) => [id, 10]));
+      town.garrison = [{ creatureId: fixture.creatures[0], count: 12 }];
+      town.builtToday = false;
+      hero.position = { ...town.position };
+      hero.movementPoints = hero.maxMovementPoints;
+      hero.alive = true;
+      state.activePlayerId = 'red';
+      state.selectedHeroId = hero.id;
+      state.pendingBattle = null;
+      state.phase = 'playing';
+      for (const resource of Object.keys(state.players.red.resources)) state.players.red.resources[resource] = 100000;
+      localStorage.setItem(key, JSON.stringify(state));
+    })()`);
+    await client.send('Page.reload', { ignoreCache: true });
+    await client.waitFor("document.querySelector('#h3-onboarding:not([hidden])') && !document.querySelector('#h3-continue').hidden");
+    await client.click('#h3-continue');
+    await client.waitFor("document.querySelector('#h3-onboarding').hidden && document.querySelector('.h3-adventure canvas')");
+    await client.click('.h3-command-bar [data-action="enter-town"]');
+    await client.waitFor(`document.querySelector('.h3-town-scene')?.dataset.faction === ${JSON.stringify(faction.id)} && document.querySelector('.h3-town-scene')?.dataset.buildingCount === '9'`);
+    await client.assert(`(() => {
+      const root = document.querySelector('.h3-town-scene');
+      const buttons = [...document.querySelectorAll('.h3-town-scene__building')];
+      const canvas = root.querySelector('canvas');
+      return document.querySelector('.h3-town-screen').textContent.includes(${JSON.stringify(faction.name)}) &&
+        buttons.length === 9 && root.querySelectorAll('.h3-town-scene__label').length === 9 &&
+        buttons.every((button) => button.dataset.built === 'true') && canvas.getContext('webgl2') !== null;
+    })()`, `${faction.id} did not render every constructed building in WebGL`);
+    await client.click(`.h3-town-scene__building[data-building-id="${faction.buildings[1]}"]`);
+    await client.waitFor(`document.querySelector('[data-creature-card="${faction.creatures[1]}"]')?.classList.contains('is-focused')`);
+    await client.click(`[data-creature-card="${faction.creatures[1]}"] [data-action="recruit-creature"]`);
+    await client.waitFor(`document.querySelector('[data-creature-card="${faction.creatures[1]}"] .h3-recruit-available strong')?.textContent.trim() === '9'`);
+    await client.assert(`(() => {
+      const panel = document.querySelector('.h3-town-panel');
+      const card = document.querySelector('[data-creature-card="${faction.creatures[1]}"]');
+      return panel.scrollWidth <= panel.clientWidth + 1 && card.getBoundingClientRect().left >= 0 && card.getBoundingClientRect().right <= innerWidth;
+    })()`, `${faction.id} desktop building interaction overflows its panel`);
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await client.waitFor('innerWidth === 390 && document.querySelector(".h3-town-scene canvas").clientWidth > 0');
+    await client.assert(`(() => {
+      const screen = document.querySelector('.h3-town-screen').getBoundingClientRect();
+      const scene = document.querySelector('.h3-town-scene').getBoundingClientRect();
+      const card = document.querySelector('[data-creature-card="${faction.creatures[1]}"]').getBoundingClientRect();
+      const panel = document.querySelector('.h3-town-panel');
+      const buttons = [...document.querySelectorAll('.h3-town-scene__building')].map((button) => button.getBoundingClientRect());
+      return screen.left >= 0 && screen.right <= innerWidth && scene.left >= 0 && scene.right <= innerWidth &&
+        card.left >= 0 && card.right <= innerWidth && panel.scrollWidth <= panel.clientWidth + 1 &&
+        buttons.length === 9 && buttons.every((rect) => rect.left >= 0 && rect.right <= innerWidth);
+    })()`, `${faction.id} mobile town or building controls overflow the viewport`);
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await client.waitFor('innerWidth === 1280');
+    console.log(`  ${faction.id}: 9 models, recruitment, desktop and mobile passed`);
+  }
+
   if (process.env.H3_SCREENSHOT) {
     const screenshot = await client.send('Page.captureScreenshot', { format: 'png' });
     await writeFile(resolve(projectRoot, process.env.H3_SCREENSHOT), Buffer.from(screenshot.data, 'base64'));
   }
   if (client.exceptions.length) throw new Error(`Browser exceptions:\n${client.exceptions.join('\n')}`);
-  console.log('Browser smoke passed: 13-faction onboarding, 13-town atlas, mobile layouts, hero cycling, Haven and Tower construction/recruitment, 13-town save/load, and classic/new-unit battles.');
+  console.log('Browser smoke passed: /vcmik3/ production entry, 13-faction WebGL towns and packs, raycast and keyboard building interactions, confirmed construction with live model updates, recruitment/army/spellbook flows, desktop/mobile layouts, save/load, and tactical battles.');
 } catch (error) {
   if (chromeErrors.length) console.error(chromeErrors.join(''));
   throw error;

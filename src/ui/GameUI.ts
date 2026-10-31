@@ -1,4 +1,6 @@
 import '../styles.css';
+import '../town/factions';
+import { TownScene, type TownBuildingInteraction } from '../town/TownScene';
 import { MAX_ARMY_STACKS } from '../game/army';
 import {
   RESOURCE_TYPES,
@@ -44,8 +46,8 @@ import {
 import { creaturePortrait, factionIcon, heroPortrait, icon, resourceIcon, townBanner } from './icons';
 import { Minimap } from './Minimap';
 import { getFactionVisual, ROSTER_COUNTS } from './presentation';
+import { getTownBuildingDestination, type TownTab } from './townInteractions';
 
-type TownTab = 'overview' | 'construction' | 'recruitment' | 'army';
 type ToastTone = 'info' | 'success' | 'warning' | 'error';
 
 interface HeroSnapshot {
@@ -71,6 +73,10 @@ export class GameUI {
   private lastBattleId: string | null;
   private activeTownId: string | null = null;
   private townTab: TownTab = 'overview';
+  private townScene: TownScene | null = null;
+  private townScreenTownId: string | null = null;
+  private focusedTownBuildingId: string | null = null;
+  private focusedCreatureId: string | null = null;
   private battleActive = false;
   private minimapExpanded = false;
   private disposed = false;
@@ -345,38 +351,63 @@ export class GameUI {
   private renderTown(state: Readonly<GameState>): void {
     const layer = this.query<HTMLElement>('.h3-town-layer');
     const town = this.activeTownId ? this.store.getTown(this.activeTownId) : undefined;
-    if (this.battleActive || !town || town.ownerId !== state.activePlayerId) {
-      layer.hidden = true;
-      layer.innerHTML = '';
+    const player = state.players[state.activePlayerId];
+    if (this.battleActive || !town || town.ownerId !== state.activePlayerId || !player) {
+      this.destroyTownScreen();
       if (town?.ownerId !== state.activePlayerId) this.activeTownId = null;
       return;
     }
     layer.hidden = false;
-    const player = state.players[state.activePlayerId];
-    if (!player) return;
     const income = getDailyIncome(town);
     const visual = getFactionVisual(town.faction);
-    const tabs: Array<{ id: TownTab; label: string; icon: 'castle' | 'construction' | 'recruit' | 'army' }> = [
+    if (this.townScreenTownId !== town.id || !this.townScene) {
+      this.destroyTownScreen();
+      layer.hidden = false;
+      layer.innerHTML = `
+        <div class="h3-town-screen" role="region" aria-label="${escapeHtml(town.name)} town" data-faction="${escapeHtml(town.faction)}" style="--h3-faction:${visual.primary};--h3-faction-accent:${visual.accent};--h3-faction-dark:${visual.dark}">
+          <header class="h3-town-header"></header>
+          <nav class="h3-town-tabs" aria-label="Town sections"></nav>
+          <div class="h3-town-content"><div class="h3-town-workspace"><section class="h3-town-model" aria-label="Interactive town model"><div class="h3-town-scene-host"></div></section><div class="h3-town-panel"></div></div></div>
+          <footer class="h3-town-footer"></footer>
+        </div>`;
+      const host = layer.querySelector<HTMLElement>('.h3-town-scene-host');
+      if (!host) throw new Error('Town scene host could not be created');
+      this.townScene = new TownScene(host, this.store, this.handleTownBuildingInteraction);
+      this.townScreenTownId = town.id;
+      this.townScene.setTown(town.id);
+    }
+    const screen = layer.querySelector<HTMLElement>('.h3-town-screen');
+    if (!screen) throw new Error('Town screen could not be rendered');
+    const tabs: Array<{ id: TownTab; label: string; icon: 'castle' | 'construction' | 'recruit' | 'army' | 'book' }> = [
       { id: 'overview', label: 'Town overview', icon: 'castle' },
       { id: 'construction', label: 'Construction', icon: 'construction' },
       { id: 'recruitment', label: 'Recruitment', icon: 'recruit' },
       { id: 'army', label: 'Army management', icon: 'army' },
+      { id: 'spellbook', label: 'Spellbook', icon: 'book' },
     ];
     let content = '';
     if (this.townTab === 'overview') content = this.renderTownOverview(town, player.resources);
     else if (this.townTab === 'construction') content = this.renderConstruction(town, player.resources);
     else if (this.townTab === 'recruitment') content = this.renderRecruitment(town, player.resources);
-    else content = this.renderArmyManagement(state, town);
-    layer.innerHTML = `
-      <div class="h3-town-screen" role="region" aria-label="${escapeHtml(town.name)} town" data-faction="${escapeHtml(town.faction)}" style="--h3-faction:${visual.primary};--h3-faction-accent:${visual.accent};--h3-faction-dark:${visual.dark}">
-        <header class="h3-town-header">
-          <div class="h3-town-banner">${townBanner(town.faction)}<div><p class="h3-eyebrow">${factionIcon(town.faction)} ${escapeHtml(town.faction)} stronghold · Four-tier roster</p><h1>${escapeHtml(town.name)}</h1><p>${hasResourceCost(income) ? `${formatCost(income)} each day` : 'A quiet frontier settlement'}</p></div></div>
-          <div class="h3-town-header-actions"><span class="h3-build-status ${town.builtToday ? 'is-waiting' : ''}">${icon(town.builtToday ? 'check' : 'construction')}${town.builtToday ? 'Construction complete today' : 'Construction available'}</span><button type="button" class="h3-button" data-action="town-exit" aria-label="Leave ${escapeHtml(town.name)} and return to the adventure map">${icon('close')} Leave town <kbd>Esc</kbd></button></div>
-        </header>
-        <nav class="h3-town-tabs" aria-label="Town sections">${tabs.map((tab) => `<button type="button" data-action="town-tab" data-town-tab="${tab.id}" class="${this.townTab === tab.id ? 'is-active' : ''}" aria-pressed="${this.townTab === tab.id}">${icon(tab.icon)}<span>${tab.label}</span></button>`).join('')}</nav>
-        <div class="h3-town-content">${content}</div>
-        <footer class="h3-town-footer"><span>${icon('coins')} Treasury: <strong>${formatNumber(player.resources.gold)} gold</strong></span><span>${formatCalendarShort(state.calendar)}</span><span>One building may be completed per town each day.</span></footer>
-      </div>`;
+    else if (this.townTab === 'army') content = this.renderArmyManagement(state, town);
+    else content = this.renderSpellbook(town);
+    screen.querySelector<HTMLElement>('.h3-town-header')!.innerHTML = `
+      <div class="h3-town-banner">${townBanner(town.faction)}<div><p class="h3-eyebrow">${factionIcon(town.faction)} ${escapeHtml(town.faction)} stronghold · Four-tier roster</p><h1>${escapeHtml(town.name)}</h1><p>${hasResourceCost(income) ? `${formatCost(income)} each day` : 'A quiet frontier settlement'}</p></div></div>
+      <div class="h3-town-header-actions"><span class="h3-build-status ${town.builtToday ? 'is-waiting' : ''}">${icon(town.builtToday ? 'check' : 'construction')}${town.builtToday ? 'Construction complete today' : 'Construction available'}</span><button type="button" class="h3-button" data-action="town-exit" aria-label="Leave ${escapeHtml(town.name)} and return to the adventure map">${icon('close')} Leave town <kbd>Esc</kbd></button></div>`;
+    screen.querySelector<HTMLElement>('.h3-town-tabs')!.innerHTML = tabs.map((tab) => `<button type="button" data-action="town-tab" data-town-tab="${tab.id}" class="${this.townTab === tab.id ? 'is-active' : ''}" aria-pressed="${this.townTab === tab.id}">${icon(tab.icon)}<span>${tab.label}</span></button>`).join('');
+    screen.querySelector<HTMLElement>('.h3-town-panel')!.innerHTML = content;
+    screen.querySelector<HTMLElement>('.h3-town-footer')!.innerHTML = `<span>${icon('coins')} Treasury: <strong>${formatNumber(player.resources.gold)} gold</strong></span><span>${formatCalendarShort(state.calendar)}</span><span>One building may be completed per town each day.</span>`;
+  }
+
+  private destroyTownScreen(): void {
+    this.townScene?.dispose();
+    this.townScene = null;
+    this.townScreenTownId = null;
+    const layer = this.root.querySelector<HTMLElement>('.h3-town-layer');
+    if (layer) {
+      layer.hidden = true;
+      layer.replaceChildren();
+    }
   }
 
   private renderTownOverview(town: TownState, resources: ResourceBundle): string {
@@ -393,7 +424,7 @@ export class GameUI {
       </section>
       <div class="h3-town-overview-columns">
         <section class="h3-town-section"><header><div><p class="h3-eyebrow">Infrastructure</p><h2>Built structures</h2></div><span>${built.length} / ${getTownBuildings(town).length}</span></header>
-          <div class="h3-built-list">${built.map((building) => `<article><span>${icon(building.creatureId ? 'recruit' : building.dailyIncome ? 'coins' : 'castle')}</span><div><strong>${escapeHtml(building.name)}</strong><p>${escapeHtml(building.description)}</p>${building.dailyIncome ? `<small>+${formatCost(building.dailyIncome)} daily</small>` : ''}</div>${icon('check')}</article>`).join('')}</div>
+          <div class="h3-built-list">${built.map((building) => `<article data-overview-building="${escapeHtml(building.id)}" class="${this.focusedTownBuildingId === building.id ? 'is-focused' : ''}" tabindex="-1"><span>${icon(building.creatureId ? 'recruit' : building.dailyIncome ? 'coins' : 'castle')}</span><div><strong>${escapeHtml(building.name)}</strong><p>${escapeHtml(building.description)}</p>${building.dailyIncome ? `<small>+${formatCost(building.dailyIncome)} daily</small>` : ''}</div>${icon('check')}</article>`).join('')}</div>
           <button type="button" class="h3-button h3-section-action" data-action="town-tab" data-town-tab="construction">${icon('construction')} View construction options ${icon('right')}</button>
         </section>
         <section class="h3-town-section"><header><div><p class="h3-eyebrow">Military dwellings</p><h2>Weekly growth</h2></div><span>${dwellingBuildings.length} dwellings</span></header>
@@ -422,7 +453,7 @@ export class GameUI {
       <div class="h3-building-grid">${buildings.map((building) => {
         const availability = getBuildingAvailability(town, resources, building);
         const creature = building.creatureId ? getCreature(building.creatureId) : null;
-        return `<article class="h3-building-card is-${availability.status}">
+        return `<article class="h3-building-card is-${availability.status} ${this.focusedTownBuildingId === building.id ? 'is-focused' : ''}" data-building-card="${escapeHtml(building.id)}" tabindex="-1">
           <header><span class="h3-building-icon">${icon(creature ? 'recruit' : building.dailyIncome ? 'coins' : building.id === 'mageGuild' ? 'book' : 'castle')}</span><div><h3>${escapeHtml(building.name)}</h3><p>${escapeHtml(building.description)}</p></div><span class="h3-status-badge">${availability.status === 'built' ? 'Built' : availability.status === 'ready' ? 'Available' : availability.status === 'locked' ? 'Locked' : availability.status === 'wait' ? 'Tomorrow' : 'Resources needed'}</span></header>
           <div class="h3-building-benefits">${building.dailyIncome ? `<span>${icon('coins')} +${formatCost(building.dailyIncome)} / day</span>` : ''}${creature ? `<span>${icon('recruit')} +${creature.growth} ${escapeHtml(creature.name)} / week</span>` : ''}</div>
           <div class="h3-prerequisites"><small>Prerequisites</small>${building.prerequisites.length ? building.prerequisites.map((id) => {
@@ -449,7 +480,7 @@ export class GameUI {
         const available = town.dwellingPools[creature.id] ?? 0;
         const limit = getRecruitLimit(town, resources, creature.id);
         const quantity = limit > 0 ? 1 : 0;
-        return `<article class="h3-recruit-card" data-creature-card="${escapeHtml(creature.id)}" style="--h3-faction:${visual.primary}">
+        return `<article class="h3-recruit-card ${this.focusedCreatureId === creature.id ? 'is-focused' : ''}" data-creature-card="${escapeHtml(creature.id)}" style="--h3-faction:${visual.primary}" tabindex="-1">
           <header><div class="h3-creature-frame">${creaturePortrait(creature.id)}<span>Tier ${creature.tier}</span></div><div><p class="h3-eyebrow">${factionIcon(creature.faction)} ${escapeHtml(creature.faction)} · ${escapeHtml(building.name)}</p><h3>${escapeHtml(creature.name)}</h3><p>${creature.abilities.length ? creature.abilities.map((ability) => escapeHtml(ability.replace(/([A-Z])/g, ' $1'))).join(' · ') : 'Steady frontline troops'}</p></div><div class="h3-recruit-available"><strong>${available}</strong><span>available</span><small>+${creature.growth} / week</small></div></header>
           <div class="h3-creature-stats"><span>Attack <strong>${creature.attack}</strong></span><span>Defense <strong>${creature.defense}</strong></span><span>Damage <strong>${creature.damage[0]}–${creature.damage[1]}</strong></span><span>Health <strong>${creature.health}</strong></span><span>Speed <strong>${creature.speed}</strong></span>${creature.shots ? `<span>Shots <strong>${creature.shots}</strong></span>` : ''}</div>
           <div class="h3-recruit-cost"><span>Each</span>${this.costHtml(creature.cost, resources)}</div>
@@ -501,6 +532,21 @@ export class GameUI {
     </section>`;
   }
 
+  private renderSpellbook(town: TownState): string {
+    if (!town.buildings.includes('mageGuild')) {
+      return `<div class="h3-empty-state h3-large-empty" data-spellbook="locked">${icon('book')}<h2 data-spellbook-heading tabindex="-1">Mage Guild required</h2><p>Construct the Mage Guild to review the visiting hero’s spellbook.</p><button type="button" class="h3-button" data-action="town-focus-building" data-building-id="mageGuild">${icon('construction')} View Mage Guild construction</button></div>`;
+    }
+    const hero = this.getVisitingHero(town);
+    const spells = hero?.spells.map((id) => getSpell(id)) ?? [];
+    const effects = { heal: 'Restore health', damage: 'Magical damage', haste: 'Increase speed', slow: 'Reduce speed', shield: 'Increase defense', bless: 'Improve damage' } as const;
+    const targets = { self: 'Self', ally: 'One allied stack', enemy: 'One enemy stack', allEnemies: 'All enemy stacks' } as const;
+    return `<section class="h3-spellbook" data-spellbook="ready"><header class="h3-section-heading"><div><p class="h3-eyebrow">Mage Guild repository</p><h2 data-spellbook-heading tabindex="-1">Hero spellbook</h2><p>Review the spells known by the visiting hero. Casting remains part of tactical combat.</p></div><span>${hero ? `${escapeHtml(hero.name)} · ${hero.mana}/${hero.maxMana} mana` : 'No visiting hero'}</span></header>
+      ${hero ? `<div class="h3-spellbook-hero"><div class="h3-portrait-frame">${heroPortrait(hero.definitionId, hero.name)}<span>LV ${hero.level}</span></div><div><h3>${escapeHtml(hero.name)}</h3><p>${spells.length} known spells · Spell power ${hero.primarySkills.spellPower} · Knowledge ${hero.primarySkills.knowledge}</p><div class="h3-meter is-mana" aria-label="${hero.mana} of ${hero.maxMana} mana"><i style="width:${Math.max(0, Math.min(100, hero.mana / hero.maxMana * 100))}%"></i></div></div></div>` : `<p class="h3-town-tip">${icon('info')} Bring a friendly hero to ${escapeHtml(town.name)} to open their spellbook.</p>`}
+      ${hero && spells.length ? `<div class="h3-spell-grid">${spells.map((spell) => `<article class="h3-spell-card" data-spell-id="${escapeHtml(spell.id)}"><header><span>${icon('spark')}</span><div><h3>${escapeHtml(spell.name)}</h3><p>Level ${spell.level} · ${escapeHtml(spell.school)} magic</p></div><strong>${spell.manaCost} mana</strong></header><dl><div><dt>Effect</dt><dd>${effects[spell.effect]} · ${spell.power} power</dd></div><div><dt>Target</dt><dd>${targets[spell.target]}</dd></div></dl></article>`).join('')}</div>` : hero ? '<p class="h3-empty-state">This hero has not learned any spells.</p>' : ''}
+      <p class="h3-town-tip">${icon('info')} The spellbook reflects the hero’s current saved spell list and mana. It does not teach spells, spend mana, or bypass combat rules.</p>
+    </section>`;
+  }
+
   private readonly handleClick = (event: MouseEvent): void => {
     const target = event.target instanceof Element ? event.target : null;
     const button = target?.closest<HTMLButtonElement>('button[data-action]');
@@ -521,19 +567,19 @@ export class GameUI {
     else if (action === 'town-exit') this.exitTown();
     else if (action === 'town-tab') {
       const tab = button.dataset.townTab;
-      if (tab === 'overview' || tab === 'construction' || tab === 'recruitment' || tab === 'army') {
+      if (tab === 'overview' || tab === 'construction' || tab === 'recruitment' || tab === 'army' || tab === 'spellbook') {
         this.townTab = tab;
+        this.focusedTownBuildingId = null;
+        this.focusedCreatureId = null;
         this.render();
         this.root.querySelector<HTMLButtonElement>(`[data-town-tab="${tab}"]`)?.focus({ preventScroll: true });
       }
+    } else if (action === 'town-focus-building') {
+      if (button.dataset.buildingId) this.focusConstructionCard(button.dataset.buildingId);
     } else if (action === 'construct-building') {
       const townId = this.activeTownId;
       const buildingId = button.dataset.buildingId;
-      if (!townId || !buildingId) return;
-      const building = getBuilding(buildingId);
-      const result = this.store.constructBuilding(townId, buildingId);
-      if (!result.ok) this.notify('Construction unavailable', result.error, 'error');
-      else this.notify('Construction complete', `${building.name} now stands in ${result.value.name}.`, 'success');
+      if (townId && buildingId) this.confirmConstruction(townId, buildingId);
     } else if (action === 'recruit-adjust' || action === 'recruit-max') {
       const card = button.closest<HTMLElement>('[data-creature-card]');
       const input = card?.querySelector<HTMLInputElement>('[data-recruit-input]');
@@ -698,9 +744,47 @@ export class GameUI {
     if (!town || town.ownerId !== this.store.getState().activePlayerId || this.battleActive) return;
     this.activeTownId = townId;
     this.townTab = 'overview';
+    this.focusedTownBuildingId = null;
+    this.focusedCreatureId = null;
     this.minimapExpanded = false;
     this.render();
     this.root.querySelector<HTMLButtonElement>('[data-action="town-exit"]')?.focus({ preventScroll: true });
+  }
+
+  private readonly handleTownBuildingInteraction = (interaction: TownBuildingInteraction): void => {
+    const town = this.store.getTown(interaction.townId);
+    if (this.disposed || this.battleActive || !town || this.activeTownId !== town.id) return;
+    const destination = getTownBuildingDestination({
+      ...interaction,
+      built: town.buildings.includes(interaction.buildingId),
+    });
+    this.townTab = destination.tab;
+    this.focusedTownBuildingId = destination.buildingId ?? null;
+    this.focusedCreatureId = destination.creatureId ?? null;
+    this.render();
+    if (destination.tab === 'construction') this.focusTownElement(`[data-building-card="${interaction.buildingId}"]`);
+    else if (destination.tab === 'recruitment' && destination.creatureId) this.focusTownElement(`[data-creature-card="${destination.creatureId}"]`);
+    else if (destination.tab === 'overview') this.focusTownElement(`[data-overview-building="${interaction.buildingId}"]`);
+    else if (destination.tab === 'army') this.focusTownElement('.h3-army-management h2');
+    else if (destination.tab === 'spellbook') this.focusTownElement('[data-spellbook-heading]');
+  };
+
+  private focusConstructionCard(buildingId: string): void {
+    if (!this.activeTownId) return;
+    getBuilding(buildingId);
+    this.townTab = 'construction';
+    this.focusedTownBuildingId = buildingId;
+    this.focusedCreatureId = null;
+    this.render();
+    this.focusTownElement(`[data-building-card="${buildingId}"]`);
+  }
+
+  private focusTownElement(selector: string): void {
+    const element = this.root.querySelector<HTMLElement>(selector);
+    if (!element) return;
+    element.tabIndex = -1;
+    element.focus({ preventScroll: true });
+    element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   private exitTown(): void {
@@ -817,6 +901,35 @@ export class GameUI {
     }, true);
   }
 
+  private confirmConstruction(townId: string, buildingId: string): void {
+    const town = this.store.getTown(townId);
+    const player = this.store.getState().players[this.store.getState().activePlayerId];
+    if (!town || !player || this.activeTownId !== townId) return;
+    const building = getBuilding(buildingId);
+    const availability = getBuildingAvailability(town, player.resources, building);
+    if (availability.status !== 'ready') {
+      this.notify('Construction unavailable', availability.reason, 'warning');
+      return;
+    }
+    const prerequisites = building.prerequisites.length
+      ? building.prerequisites.map((id) => getBuilding(id).name).join(', ')
+      : 'None';
+    this.dialogs.show({
+      title: `Construct ${building.name}?`,
+      eyebrow: `${town.name} · One project per day`,
+      body: `<p>${escapeHtml(building.description)}</p><div class="h3-construction-confirmation"><span>Cost</span><div>${this.costHtml(building.cost, player.resources)}</div><span>Prerequisites</span><strong>${escapeHtml(prerequisites)}</strong></div><p>Construction is permanent and uses this town’s project for today. The game will check costs and prerequisites again before building.</p>`,
+      actions: [
+        { label: 'Cancel', className: 'is-secondary' },
+        { label: 'Construct building', icon: 'check', autofocus: true, onSelect: () => {
+          if (this.activeTownId !== townId) return;
+          const result = this.store.constructBuilding(townId, buildingId);
+          if (!result.ok) this.notify('Construction unavailable', result.error, 'error');
+          else this.notify('Construction complete', `${building.name} now stands in ${result.value.name}.`, 'success');
+        } },
+      ],
+    });
+  }
+
   private showConfirmation(
     title: string,
     message: string,
@@ -878,8 +991,9 @@ export class GameUI {
       className: 'h3-help-dialog',
       body: `<div class="h3-help-grid">
         <section><h3>${icon('movement')} Movement & selection</h3><p>Left-click an owned hero to select them. Left-click a highlighted reachable tile or object to travel; the store checks the path and spends movement points. Click the object beneath your hero to interact again.</p><p>The strategic map also supports click travel. Focus it and use <kbd>Arrow keys</kbd> to choose a tile, then <kbd>Enter</kbd> to travel.</p></section>
-        <section><h3>${icon('compass')} Camera</h3><p><strong>Left-drag</strong> or <strong>middle-drag</strong> to pan. <strong>Right-drag</strong> rotates and adjusts pitch. Use the <strong>mouse wheel</strong> or <strong>Ctrl + wheel</strong> to zoom; <strong>Shift + wheel</strong> pans.</p><p><kbd>Arrow keys</kbd> pan, <kbd>Q</kbd>/<kbd>E</kbd> rotate, <kbd>+</kbd>/<kbd>−</kbd> zoom, and <kbd>F</kbd> focuses the selected hero.</p></section>
-        <section><h3>${icon('castle')} Towns & armies</h3><p>Move onto a friendly town and enter to construct one building per day, recruit available creatures, and transfer stacks between the visiting hero and garrison. Creature growth arrives weekly; income arrives daily.</p><p>Adventure dwellings offer recruits too. Resources and army capacity are checked by the real game store before every action.</p></section>
+        <section><h3>${icon('compass')} Adventure camera</h3><p><strong>Left-drag</strong> or <strong>middle-drag</strong> to pan. <strong>Right-drag</strong> rotates and adjusts pitch. Use the <strong>mouse wheel</strong> or <strong>Ctrl + wheel</strong> to zoom; <strong>Shift + wheel</strong> pans.</p><p><kbd>Arrow keys</kbd> pan, <kbd>Q</kbd>/<kbd>E</kbd> rotate, <kbd>+</kbd>/<kbd>−</kbd> zoom, and <kbd>F</kbd> focuses the selected hero.</p></section>
+        <section><h3>${icon('castle')} Towns & armies</h3><p>Every faction’s buildings appear in its interactive 3D town. Click a built dwelling for its recruitment card, the Fort for army transfers, the Mage Guild for the visiting hero’s spellbook, or a civic building for economy details.</p><p>Click an unbuilt model to focus its construction card. Costs, prerequisites, the one-project-per-day limit, and confirmation still apply. Creature growth arrives weekly; income arrives daily.</p></section>
+        <section><h3>${icon('construction')} Town model & keyboard</h3><p>Drag to pan, right-drag to rotate, and use the wheel or camera buttons to zoom. The Town buildings list provides a button for every model, including touch and keyboard access.</p><p>On the town canvas, <kbd>Arrow keys</kbd> pan, <kbd>Q</kbd>/<kbd>E</kbd> rotate, <kbd>[</kbd>/<kbd>]</kbd> select buildings, and <kbd>Enter</kbd> activates the selection. Use the town tabs for the same functions without clicking a model.</p></section>
         <section><h3>${icon('endTurn')} Turns & battle</h3><p>End the turn to restore hero movement and mana, collect town and mine income, and allow opposing players to act. Monday brings new creature growth.</p><p>Moving onto hostile forces creates a battle handoff. The tactical battlefield takes control; adventure commands resume only after its result is applied to the campaign.</p></section>
         <section><h3>${icon('map')} Realm roster</h3><p>${ROSTER_COUNTS.factions} factions field ${ROSTER_COUNTS.units} units across four tiers per faction. Every town has its own construction chain and recruitment pool.</p><p>Expand the strategic map to open the town atlas. It lists every town in the current campaign, including older two- and four-town saves, with faction colors and ownership.</p></section>
       </div>
@@ -1026,6 +1140,7 @@ export class GameUI {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.destroyTownScreen();
     this.unsubscribe();
     this.minimap.dispose();
     this.dialogs.dispose();

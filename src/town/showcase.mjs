@@ -1,0 +1,332 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createServer } from 'vite';
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const chromePath = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+async function pathExists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForFile(path, timeout = 20000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await pathExists(path)) return readFile(path, 'utf8');
+    await delay(100);
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
+class CdpClient {
+  constructor(socket) {
+    this.socket = socket;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.exceptions = [];
+    socket.addEventListener('message', (event) => {
+      const message = JSON.parse(String(event.data));
+      if (message.method === 'Runtime.exceptionThrown') {
+        this.exceptions.push(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text);
+      }
+      if (!message.id) return;
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(`${message.error.message}: ${message.error.data ?? ''}`));
+      else pending.resolve(message.result);
+    });
+    socket.addEventListener('close', () => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Chrome DevTools connection closed'));
+      }
+      this.pending.clear();
+    });
+  }
+
+  static async connect(url) {
+    const socket = new WebSocket(url);
+    await new Promise((resolveOpen, rejectOpen) => {
+      const timer = setTimeout(() => rejectOpen(new Error('Timed out connecting to Chrome')), 10000);
+      socket.addEventListener('open', () => {
+        clearTimeout(timer);
+        resolveOpen();
+      }, { once: true });
+      socket.addEventListener('error', () => {
+        clearTimeout(timer);
+        rejectOpen(new Error('Unable to connect to Chrome DevTools'));
+      }, { once: true });
+    });
+    return new CdpClient(socket);
+  }
+
+  send(method, params = {}, timeout = 30000) {
+    const id = this.nextId++;
+    return new Promise((resolveSend, rejectSend) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        rejectSend(new Error(`DevTools command timed out: ${method}`));
+      }, timeout);
+      this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timer });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async evaluate(expression) {
+    const response = await this.send('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+      userGesture: true,
+    });
+    if (response.exceptionDetails) {
+      throw new Error(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text);
+    }
+    return response.result.value;
+  }
+
+  async waitFor(expression, timeout = 20000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const value = await this.evaluate(`(() => { try { return Boolean(${expression}); } catch { return false; } })()`);
+      if (value) return;
+      await delay(100);
+    }
+    throw new Error(`Timed out waiting for: ${expression}`);
+  }
+
+  async assert(expression, message) {
+    const value = await this.evaluate(expression);
+    if (!value) throw new Error(message ?? `Browser assertion failed: ${expression}`);
+  }
+
+  async click(selector) {
+    await this.waitFor(`document.querySelector(${JSON.stringify(selector)})`);
+    await this.evaluate(`(() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!element) throw new Error('Missing element: ${selector}');
+      element.click();
+      return true;
+    })()`);
+  }
+
+  async mouse(type, x, y, extra = {}) {
+    await this.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', ...extra });
+  }
+
+  close() {
+    this.socket.close();
+  }
+}
+
+const factionIds = [
+  'haven', 'grove', 'ember', 'mire', 'tower', 'necropolis', 'dungeon',
+  'stronghold', 'conflux', 'cove', 'factory', 'bulwark', 'courtyard',
+];
+
+async function activateEveryBuilding(client, faction, expectedIds, built) {
+  const result = await client.evaluate(`(async () => {
+    const { BUILDINGS } = await import('/src/game/content.ts');
+    const ids = ${JSON.stringify(expectedIds)};
+    window.__townShowcase.clearInteractions();
+    const buttons = [...document.querySelectorAll('.h3-town-scene__building')];
+    for (const button of buttons) button.click();
+    return {
+      actual: window.__townShowcase.interactions,
+      expected: ids.map((buildingId) => {
+        const interaction = { townId: ${JSON.stringify(faction)}, buildingId, built: ${built} };
+        if (BUILDINGS[buildingId].creatureId) interaction.creatureId = BUILDINGS[buildingId].creatureId;
+        return interaction;
+      }),
+    };
+  })()`);
+  assert.deepEqual(result.actual, result.expected, `${faction} emitted inaccurate ${built ? 'built' : 'unbuilt'} interactions`);
+}
+
+async function exerciseRaycast(client, faction, built) {
+  await client.evaluate('window.__townShowcase.clearInteractions()');
+  const rect = await client.evaluate(`(() => {
+    const label = document.querySelector('.h3-town-scene__label[data-building-id="townHall"]');
+    const bounds = label.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.bottom };
+  })()`);
+  for (const offset of [8, 22, 38, 58, 82]) {
+    const x = rect.x;
+    const y = rect.y + offset;
+    await client.mouse('mouseMoved', x, y, { button: 'none' });
+    await delay(70);
+    const hovered = await client.evaluate("!document.querySelector('.h3-town-scene__tooltip').hidden && document.querySelector('.h3-town-scene canvas').style.cursor === 'pointer'");
+    if (!hovered) continue;
+    await client.mouse('mousePressed', x, y, { clickCount: 1 });
+    await client.mouse('mouseReleased', x, y, { clickCount: 1 });
+    await delay(70);
+    const interactions = await client.evaluate('window.__townShowcase.interactions');
+    if (interactions.length === 0) continue;
+    assert.deepEqual(interactions, [{ townId: faction, buildingId: 'townHall', built }], 'Raycast did not activate Town Hall');
+    return;
+  }
+  throw new Error(`Could not raycast ${built ? 'built' : 'unbuilt'} Town Hall in ${faction}`);
+}
+
+async function exerciseCameraAndResize(client, faction) {
+  const labelTransform = "() => document.querySelector('.h3-town-scene__label[data-building-id=\\\"townHall\\\"]').style.transform";
+  const beforeZoom = await client.evaluate(`(${labelTransform})()`);
+  await client.click('[aria-label="Zoom in"]');
+  await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const afterZoom = await client.evaluate(`(${labelTransform})()`);
+  assert.notEqual(afterZoom, beforeZoom, 'Zoom did not change the projected town view');
+  await client.click('[aria-label="Rotate right"]');
+  await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const afterRotate = await client.evaluate(`(${labelTransform})()`);
+  assert.notEqual(afterRotate, afterZoom, 'Rotation did not change the projected town view');
+  await client.evaluate("document.querySelector('.h3-town-scene canvas').focus()");
+  await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 });
+  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 });
+  await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const afterPan = await client.evaluate(`(${labelTransform})()`);
+  assert.notEqual(afterPan, afterRotate, 'Keyboard pan did not change the projected town view');
+  await client.click('[aria-label="Reset town camera"]');
+
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  await client.waitFor("document.querySelector('.h3-town-scene canvas').clientWidth === 390 && document.querySelector('.h3-town-scene canvas').width === 390");
+  await client.assert(`(() => {
+    const panel = document.querySelector('.h3-town-scene__buildings').getBoundingClientRect();
+    const buttons = [...document.querySelectorAll('.h3-town-scene__building')].map((button) => button.getBoundingClientRect());
+    return panel.left >= 0 && panel.right <= innerWidth && panel.bottom <= innerHeight &&
+      buttons.length === 9 && buttons.every((rect) => rect.left >= 0 && rect.right <= innerWidth);
+  })()`, `${faction} keyboard building list overflows the mobile viewport`);
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await client.waitFor("document.querySelector('.h3-town-scene canvas').clientWidth === 1280");
+}
+
+await access(chromePath);
+const profile = await mkdtemp(resolve(projectRoot, '.town-showcase-'));
+const chromeErrors = [];
+let chrome;
+let client;
+let server;
+try {
+  server = await createServer({
+    root: projectRoot,
+    configFile: false,
+    cacheDir: resolve(profile, 'vite-cache'),
+    logLevel: 'error',
+    server: { host: '127.0.0.1', port: 0 },
+    plugins: [{
+      name: 'town-scene-showcase',
+      configureServer(viteServer) {
+        viteServer.middlewares.use('/__town-showcase', (_request, response) => {
+          response.setHeader('Content-Type', 'text/html; charset=utf-8');
+          response.end('<!doctype html><html><head><meta charset="utf-8"><title>Town scene showcase</title></head><body><script type="module" src="/src/town/showcase.ts"></script></body></html>');
+        });
+      },
+    }],
+  });
+  await server.listen();
+  const address = server.httpServer?.address();
+  if (!address || typeof address === 'string') throw new Error('Vite showcase server did not start');
+  const applicationUrl = `http://127.0.0.1:${address.port}/__town-showcase`;
+  chrome = spawn(chromePath, [
+    '--headless=new',
+    '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--use-angle=swiftshader',
+    '--enable-unsafe-swiftshader',
+    '--window-size=1280,800',
+    applicationUrl,
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  chrome.stderr.on('data', (chunk) => {
+    chromeErrors.push(String(chunk));
+    if (chromeErrors.length > 30) chromeErrors.shift();
+  });
+  const devTools = await waitForFile(resolve(profile, 'DevToolsActivePort'));
+  const devToolsPort = devTools.split('\n')[0].trim();
+  let page;
+  const pageDeadline = Date.now() + 20000;
+  while (!page && Date.now() < pageDeadline) {
+    const targets = await fetch(`http://127.0.0.1:${devToolsPort}/json/list`).then((result) => result.json());
+    page = targets.find((target) => target.type === 'page' && target.url.startsWith(applicationUrl));
+    if (!page) await delay(100);
+  }
+  if (!page) throw new Error('Chrome did not open the town showcase');
+  client = await CdpClient.connect(page.webSocketDebuggerUrl);
+  await client.send('Runtime.enable');
+  await client.send('Page.enable');
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await client.waitFor("document.readyState === 'complete' && window.__townShowcase && document.querySelector('.h3-town-scene canvas')");
+  await client.assert('window.__townShowcase.subscriptionCount() === 1', 'TownScene did not subscribe exactly once');
+  await client.assert(`(() => {
+    const canvas = document.querySelector('.h3-town-scene canvas');
+    const gl = canvas.getContext('webgl2');
+    return gl && !gl.isContextLost();
+  })()`, 'TownScene did not create a real WebGL2 context');
+
+  const covered = new Set();
+  for (const faction of factionIds) {
+    for (const built of [false, true]) {
+      const expectedIds = await client.evaluate(`window.__townShowcase.setTown(${JSON.stringify(faction)}, ${built})`);
+      await client.waitFor(`(() => {
+        const root = document.querySelector('.h3-town-scene');
+        const buttons = [...document.querySelectorAll('.h3-town-scene__building')];
+        const labels = [...document.querySelectorAll('.h3-town-scene__label')];
+        return root.dataset.faction === ${JSON.stringify(faction)} && root.dataset.buildingCount === '9' &&
+          document.querySelector('.h3-town-scene__tooltip').hidden && buttons.length === 9 && labels.length === 9 &&
+          buttons.every((button) => button.dataset.built === ${JSON.stringify(String(built))});
+      })()`);
+      await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+      await client.assert(`(() => {
+        const canvas = document.querySelector('.h3-town-scene canvas');
+        const gl = canvas.getContext('webgl2');
+        return gl && !gl.isContextLost() && gl.getError() === gl.NO_ERROR;
+      })()`, `${faction} produced a WebGL error while rendering ${built ? 'built' : 'unbuilt'} models`);
+      const screenshot = await client.send('Page.captureScreenshot', { format: 'png' });
+      assert.ok(screenshot.data.length > 10000, `${faction} ${built ? 'built' : 'unbuilt'} showcase appears blank`);
+      if (faction === 'courtyard' && built && process.env.H3_TOWN_SCREENSHOT) {
+        await writeFile(resolve(projectRoot, process.env.H3_TOWN_SCREENSHOT), Buffer.from(screenshot.data, 'base64'));
+      }
+      await activateEveryBuilding(client, faction, expectedIds, built);
+      await exerciseRaycast(client, faction, built);
+      for (const id of expectedIds) covered.add(`${id}:${built}`);
+    }
+    await exerciseCameraAndResize(client, faction);
+    console.log(`Town WebGL showcase: ${faction} passed all nine built/unbuilt models and interactions`);
+  }
+  assert.equal(covered.size, 114, 'Not every building ID was covered in both construction states');
+  await client.evaluate('window.__townShowcase.clearTown()');
+  await client.assert("document.querySelector('.h3-town-scene').dataset.buildingCount === '0' && !document.querySelector('.h3-town-scene__label') && !document.querySelector('.h3-town-scene__building')", 'setTown(null) left building visuals or keyboard destinations behind');
+  await client.assert('window.__townShowcase.subscriptionCount() === 1', 'setTown(null) should retain the single reusable store subscription');
+  await client.evaluate('window.__townShowcase.setTown("haven", true)');
+  await client.waitFor("document.querySelector('.h3-town-scene').dataset.buildingCount === '9'");
+  await client.evaluate('window.__townShowcase.dispose()');
+  await client.assert("!document.querySelector('.h3-town-scene') && window.__townShowcase.subscriptionCount() === 0", 'Dispose left DOM or store subscriptions behind');
+  if (client.exceptions.length) throw new Error(`Browser exceptions:\n${client.exceptions.join('\n')}`);
+  console.log('Town WebGL showcase passed: 13 factions, 57 building IDs in both states, 114 exact interaction variants, raycasts, camera, resize, and cleanup.');
+} catch (error) {
+  if (chromeErrors.length) console.error(chromeErrors.join(''));
+  throw error;
+} finally {
+  client?.close();
+  if (chrome && chrome.exitCode === null) {
+    const exited = new Promise((resolveExit) => chrome.once('exit', resolveExit));
+    chrome.kill('SIGTERM');
+    await Promise.race([exited, delay(3000)]);
+    if (chrome.exitCode === null) chrome.kill('SIGKILL');
+  }
+  await server?.close();
+  await rm(profile, { recursive: true, force: true });
+}
