@@ -32,6 +32,10 @@ jobs:
         run: npm test -- --testTimeout=20000
       - name: Build site
         run: npm run build
+      - name: Include documentation
+        run: |
+          cp -R docs dist/docs
+          cp README.md SESSION.md dist/
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload Pages artifact
