@@ -97,7 +97,7 @@ class CdpClient {
     return new CdpClient(socket);
   }
 
-  send(method, params = {}, timeout = 180000) {
+  send(method, params = {}, timeout = 900000) {
     const id = this.nextId++;
     return new Promise((resolveSend, rejectSend) => {
       const timer = setTimeout(() => {
@@ -476,17 +476,82 @@ try {
   await client.waitFor("document.querySelector('[data-building-card=\"archeryRange\"]')?.classList.contains('is-focused')");
   await client.assert("document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'false' && !document.querySelector('.h3-dialog[open]')", 'Unbuilt model click bypassed construction');
   await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas", 'Tab routing recreated the town WebGL canvas');
+  await client.evaluate(`(() => {
+    const root = document.querySelector('.h3-town-scene');
+    window.__constructionStarts = [];
+    window.__constructionObserver = new MutationObserver(() => {
+      if (root.dataset.constructionBuildingId) window.__constructionStarts.push(root.dataset.constructionBuildingId);
+    });
+    window.__constructionObserver.observe(root, { attributes: true, attributeFilter: ['data-construction-building-id'] });
+  })()`);
+  await client.click('[data-building-card="archeryRange"] [data-action="construct-building"]');
+  await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('One project per day')");
+  await client.clickText('.h3-dialog-actions button', 'Cancel');
+  await client.waitFor("!document.querySelector('.h3-dialog[open]')");
+  await delay(80);
+  await client.assert("window.__constructionStarts.length === 0 && !document.querySelector('.h3-town-scene').dataset.constructionBuildingId && document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'false'", 'Cancelled confirmation started construction or its animation');
   await client.constructBuilding('archeryRange');
   await client.waitFor("document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true'");
+  await client.waitFor("window.__constructionStarts.length === 1 && !document.querySelector('.h3-town-scene__construction-controls').hidden");
+  await client.assert("window.__constructionStarts[0] === 'archeryRange' && document.querySelectorAll('.h3-town-scene__construction-controls').length === 1", 'Confirmed construction did not start exactly one matching timeline');
   await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas", 'Construction recreated rather than updated the town scene');
+  await client.clickText('.h3-dialog-actions button', 'Construct building');
+  await client.waitFor("document.querySelector('.h3-toasts')?.textContent.includes('Construction unavailable')");
+  await delay(80);
+  await client.assert("window.__constructionStarts.length === 1", 'Failed duplicate construction restarted the timeline');
+  await client.click('.h3-town-scene__building[data-building-id="mageGuild"]');
+  await client.waitFor("document.querySelector('[data-building-card=\"mageGuild\"]')?.classList.contains('is-focused')");
+  await client.assert("document.querySelector('[data-building-card=\"mageGuild\"] [data-action=\"construct-building\"]').disabled && !document.querySelector('.h3-dialog[open]')", 'Another building bypassed construction rules during playback');
   await client.click('.h3-town-scene__building[data-building-id="archeryRange"]');
   await client.waitFor("document.querySelector('[data-creature-card=\"archer\"]')?.classList.contains('is-focused')");
   await client.setValue('[data-creature-card="archer"] [data-recruit-input]', '2');
   await client.click('[data-creature-card="archer"] [data-action="recruit-creature"]');
   await client.waitFor("document.querySelector('[data-creature-card=\"archer\"] .h3-recruit-available strong')?.textContent.trim() === '7'");
+  await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas && !document.querySelector('.h3-town-scene__construction-controls').hidden", 'Recruitment replaced the canvas or active timeline');
   await client.click('.h3-town-scene__building[data-building-id="fort"]');
   await client.waitFor("document.querySelector('.h3-army-management') && document.querySelector('[data-town-tab=\"army\"]').getAttribute('aria-pressed') === 'true'");
   await client.assert("document.querySelector('.h3-town-scene canvas') === window.__townSmokeCanvas", 'Army routing recreated the town scene');
+
+  console.log('Browser smoke: construction scrubbing, stage controls, accessibility, reduced motion, and exit lifecycle');
+  await client.evaluate(`(() => {
+    const play = document.querySelector('[aria-label="Pause construction animation"]');
+    if (play) play.click();
+  })()`);
+  const constructionRange = '.h3-town-scene__construction-progress input';
+  await client.setValue(constructionRange, '2.4');
+  await client.waitFor("Math.abs(Number(document.querySelector('.h3-town-scene').dataset.constructionTime) - 2.4) < 0.02 && document.querySelector('.h3-town-scene').dataset.constructionPlaying === 'false'");
+  await client.assert("document.querySelector('.h3-town-scene__construction-controls [aria-valuetext]').getAttribute('aria-valuetext').includes('2.4 of')", 'Construction slider has no accessible time and stage value');
+  await client.evaluate(`document.querySelector(${JSON.stringify(constructionRange)}).focus()`);
+  for (const [key, code, virtualKey] of [['Home', 'Home', 36], ['ArrowRight', 'ArrowRight', 39], ['End', 'End', 35]]) {
+    await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKey });
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKey });
+    if (key === 'Home') await client.waitFor("Number(document.querySelector('.h3-town-scene__construction-progress input').value) === 0 && document.querySelector('.h3-town-scene').dataset.constructionStage === 'foundation'");
+    if (key === 'ArrowRight') await client.waitFor("Number(document.querySelector('.h3-town-scene__construction-progress input').value) > 0");
+    if (key === 'End') await client.waitFor("document.querySelector('.h3-town-scene').dataset.constructionStage === 'finishing' && document.querySelector('.h3-town-scene').dataset.constructionPlaying === 'false' && document.querySelector('.h3-town-scene__construction-controls').dataset.completed === 'true' && document.querySelector('[aria-label=\"Replay construction animation\"]')");
+  }
+  await client.click('[aria-label="Previous construction stage"]');
+  await client.waitFor("document.querySelector('.h3-town-scene').dataset.constructionStage === 'surroundings'");
+  await client.click('[aria-label="Next construction stage"]');
+  await client.waitFor("document.querySelector('.h3-town-scene').dataset.constructionStage === 'finishing'");
+  await client.click('[aria-label="Play construction at 2 times speed"]');
+  await client.assert("document.querySelector('.h3-town-scene').dataset.constructionSpeed === '2' && document.querySelector('[aria-label=\"Play construction at 2 times speed\"]').getAttribute('aria-pressed') === 'true'", 'Construction speed control did not update playback state');
+  await client.key('.h3-town-scene canvas', 'F1');
+  await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('Construction playback') && document.querySelector('.h3-dialog[open]')?.textContent.includes('Reduced-motion')");
+  await client.clickText('.h3-dialog-actions button', 'Ready for adventure');
+  await client.setValue(constructionRange, '2.4');
+  await client.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await client.waitFor("document.querySelector('.h3-town-scene__construction-controls').dataset.reducedMotion === 'true' && document.querySelector('.h3-town-scene').dataset.constructionStage === 'finishing' && document.querySelector('.h3-town-scene').dataset.constructionPlaying === 'false' && document.querySelector('.h3-town-scene__construction-controls').dataset.completed === 'true' && document.querySelector('[aria-label=\"Replay construction animation\"]')");
+  await client.assert("document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true' && document.querySelector('.h3-town-scene__construction-component').textContent.includes('All components in place')", 'Reduced motion did not preserve the completed building model state');
+  await client.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  await client.waitFor("document.querySelector('.h3-town-scene__construction-controls').dataset.reducedMotion === 'false'");
+  await client.click('[aria-label="Replay construction animation"]');
+  await client.waitFor("document.querySelector('.h3-town-scene').dataset.constructionPlaying === 'true'");
+  await client.click('[data-action="town-exit"]');
+  await client.waitFor("!document.querySelector('.h3-town-scene')");
+  await client.click('[data-action="enter-town"]');
+  await client.waitFor("document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true'");
+  await client.assert("document.querySelector('.h3-town-scene__construction-controls').hidden && window.__constructionStarts.length === 1", 'Leaving and reopening town replayed or retained the old timeline');
+  await client.evaluate("window.__townSmokeCanvas = document.querySelector('.h3-town-scene canvas')");
 
   console.log('Browser smoke: save and turn advancement');
   await client.click('[data-action="town-exit"]');
@@ -513,7 +578,7 @@ try {
   await client.waitFor("document.querySelector('.h3-calendar')?.textContent.includes('Day 1') && !document.querySelector('.h3b-root')");
   await client.click('[data-action="enter-town"]');
   await client.click('[data-town-tab="construction"]');
-  await client.assert("document.querySelector('[data-building-card=\"archeryRange\"] .h3-status-badge')?.textContent === 'Built' && document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true'", 'Loaded save lost town construction or its model state');
+  await client.assert("document.querySelector('[data-building-card=\"archeryRange\"] .h3-status-badge')?.textContent === 'Built' && document.querySelector('.h3-town-scene__building[data-building-id=\"archeryRange\"]').dataset.built === 'true' && document.querySelector('.h3-town-scene__construction-controls').hidden && window.__constructionStarts.length === 1", 'Loaded save lost construction state or replayed its old timeline');
   await client.click('[data-town-tab="recruitment"]');
   await client.assert("document.querySelector('[data-creature-card=\"archer\"] .h3-recruit-available strong')?.textContent.trim() === '7'", 'Loaded save lost recruitment state');
   await client.click('[data-action="town-exit"]');
@@ -570,8 +635,29 @@ try {
   await client.assert("document.querySelector('.h3-spellbook-hero')?.textContent.includes('Aveline')", 'Mage Guild did not open the visiting hero spellbook');
   await client.click('.h3-town-scene__building[data-building-id="gargoyleParapet"]');
   await client.waitFor("document.querySelector('[data-building-card=\"gargoyleParapet\"]')?.classList.contains('is-focused')");
+  await client.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await client.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches");
+  await client.evaluate("window.__towerConstructionCanvas = document.querySelector('.h3-town-scene canvas')");
   await client.constructBuilding('gargoyleParapet');
-  await client.waitFor("document.querySelector('.h3-town-scene__building[data-building-id=\"gargoyleParapet\"]').dataset.built === 'true'");
+  await client.waitFor("document.querySelector('.h3-town-scene__building[data-building-id=\"gargoyleParapet\"]').dataset.built === 'true' && document.querySelector('.h3-town-scene__construction-controls').dataset.reducedMotion === 'true' && document.querySelector('.h3-town-scene__construction-controls').dataset.completed === 'true' && document.querySelector('[aria-label=\"Replay construction animation\"]') && document.querySelector('.h3-town-scene__construction-component').textContent === 'All components in place'");
+  await client.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  await client.waitFor("!matchMedia('(prefers-reduced-motion: reduce)').matches && document.querySelector('.h3-town-scene__construction-controls').dataset.reducedMotion === 'false'");
+  await client.assert("document.querySelector('.h3-town-scene__construction-progress input').step === '0.001'", 'Integrated construction slider cannot represent exact timeline durations');
+  await client.setValue(constructionRange, '2.4');
+  await client.waitFor("document.querySelector('.h3-town-scene').dataset.constructionTime === '2.400' && document.querySelector('.h3-town-scene__construction-controls').dataset.completed === 'false'");
+  await client.evaluate(`document.querySelector(${JSON.stringify(constructionRange)}).focus()`);
+  await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+  await client.waitFor(`(() => {
+    const root = document.querySelector('.h3-town-scene');
+    const controls = document.querySelector('.h3-town-scene__construction-controls');
+    const component = document.querySelector('.h3-town-scene__construction-component');
+    return controls.dataset.completed === 'true' && root.dataset.constructionPlaying === 'false' &&
+      document.querySelector('[aria-label="Replay construction animation"]') && component.textContent === 'All components in place' && component.title === '' &&
+      document.querySelector('.h3-town-scene__status').textContent === 'Gargoyle Parapet construction animation complete.' &&
+      document.querySelector('.h3-town-scene__building[data-building-id="gargoyleParapet"]').dataset.built === 'true' &&
+      root.querySelector('canvas') === window.__towerConstructionCanvas;
+  })()`);
   await client.click('.h3-town-scene__building[data-building-id="gargoyleParapet"]');
   await client.waitFor("document.querySelector('[data-creature-card=\"stoneGargoyle\"]')?.classList.contains('is-focused')");
   await client.setValue('[data-creature-card="stoneGargoyle"] [data-recruit-input]', '2');
@@ -584,6 +670,16 @@ try {
     const card = document.querySelector('[data-creature-card="stoneGargoyle"]').getBoundingClientRect();
     return screen.left >= 0 && screen.right <= innerWidth && card.left >= 0 && card.right <= innerWidth;
   })()`, 'New-faction recruitment overflows the mobile town layout');
+  await client.assert(`(() => {
+    const root = document.querySelector('.h3-town-scene');
+    const scene = root.getBoundingClientRect();
+    const panel = root.querySelector('.h3-town-scene__construction-controls');
+    const controls = panel.getBoundingClientRect();
+    const interactive = [...panel.querySelectorAll('button, input')].map((element) => element.getBoundingClientRect());
+    return !panel.hidden && controls.left >= scene.left && controls.right <= scene.right && controls.top >= scene.top && controls.bottom <= scene.bottom &&
+      controls.left >= 0 && controls.right <= innerWidth && interactive.every((rect) => rect.width > 0 && rect.height > 0 && rect.left >= controls.left && rect.right <= controls.right) &&
+      document.documentElement.scrollWidth <= innerWidth;
+  })()`, 'Construction playback controls overflow the mobile town scene');
   await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await client.waitFor('innerWidth === 1280');
   await client.click('[data-town-tab="army"]');
@@ -593,6 +689,9 @@ try {
   await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('Campaign journal')");
   await client.click('[data-save="slot-2"]');
   await client.waitFor("document.querySelector('.h3-toasts')?.textContent.includes('Campaign saved') && document.querySelector('.h3-town-scene')");
+  await client.setValue(constructionRange, '2.4');
+  await client.evaluate("document.querySelector('[aria-label=\"Play construction animation\"]')?.click()");
+  await client.waitFor("document.querySelector('.h3-town-scene').dataset.constructionPlaying === 'true'");
   await client.key('.h3-town-scene canvas', 'o', { ctrlKey: true });
   await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('Campaign journal')");
   await client.click('[data-load="slot-2"]');
@@ -601,7 +700,7 @@ try {
   await client.waitFor("!document.querySelector('.h3-dialog[open]') && !document.querySelector('.h3-town-scene') && document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns')");
   await client.click('[data-action="enter-town"]');
   await client.click('[data-town-tab="construction"]');
-  await client.assert("document.querySelector('[data-building-card=\"gargoyleParapet\"] .h3-status-badge')?.textContent === 'Built' && document.querySelector('.h3-town-scene__building[data-building-id=\"gargoyleParapet\"]').dataset.built === 'true'", '13-town save lost Tower construction or its model state');
+  await client.assert("document.querySelector('[data-building-card=\"gargoyleParapet\"] .h3-status-badge')?.textContent === 'Built' && document.querySelector('.h3-town-scene__building[data-building-id=\"gargoyleParapet\"]').dataset.built === 'true' && document.querySelector('.h3-town-scene__construction-controls').hidden", 'Loading during playback lost the building or restarted its completed timeline');
   await client.click('[data-town-tab="recruitment"]');
   await client.assert("document.querySelector('[data-creature-card=\"stoneGargoyle\"] .h3-recruit-available strong')?.textContent.trim() === '7'", '13-town save lost Tower recruitment');
   await client.click('[data-action="town-exit"]');

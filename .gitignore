@@ -30,6 +30,8 @@ lerna-debug.log*
 *.tsbuildinfo
 
 # Local environments and toolchains
+.tmp-node/
+.verify-node/
 .env
 .env.*
 !.env.example

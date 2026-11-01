@@ -210,6 +210,173 @@ async function exerciseCameraAndResize(client, faction) {
   await client.waitFor("document.querySelector('.h3-town-scene canvas').clientWidth === 1280");
 }
 
+async function exerciseConstructionTimeline(client) {
+  console.log('Town WebGL showcase: deterministic construction timeline');
+  await client.evaluate("window.__townShowcase.setTown('haven', false)");
+  const confirmed = await client.evaluate("window.__townShowcase.constructConfirmed('townHall')");
+  assert.equal(confirmed.buildingId, 'townHall', 'Confirmed construction did not start the correct building timeline');
+  assert.equal(confirmed.stageId, 'foundation');
+  assert.equal(confirmed.playing, true, 'Confirmed construction did not autoplay');
+  await client.waitFor("!document.querySelector('.h3-town-scene__construction-controls').hidden && document.querySelector('.h3-town-scene').dataset.constructionBuildingId === 'townHall'");
+
+  const baseline = await client.evaluate(`(() => {
+    const api = window.__townShowcase;
+    api.pauseConstruction();
+    api.cancelConstruction();
+    return api.constructionSnapshot('townHall');
+  })()`);
+  assert.ok(baseline.length >= 8, 'Constructed Town Hall lost its original mesh components');
+  const baselineGeometries = new Set(baseline.map((mesh) => mesh.geometryUuid));
+  const started = await client.evaluate("window.__townShowcase.startConstruction('townHall', { autoplay: false, reducedMotion: false })");
+  assert.equal(started.time, 0);
+  assert.equal(started.playing, false);
+  assert.equal(started.stageIndex, 0);
+  const stages = await client.evaluate('window.__townShowcase.constructionStages()');
+  assert.deepEqual(stages.map((stage) => stage.id), ['foundation', 'supports', 'walls', 'roof', 'fittings', 'details', 'surroundings', 'finishing']);
+
+  for (const stage of stages) {
+    const time = stage.start + stage.duration * 0.55;
+    const status = await client.evaluate(`window.__townShowcase.scrubConstruction(${time})`);
+    assert.equal(status.stageIndex, stage.index, `Scrubbing did not select ${stage.id}`);
+    assert.equal(status.stageLabel, stage.label);
+    assert.equal(status.component.stageIndex, stage.index, `${stage.id} highlight is not linked to its geometry`);
+    const stageState = await client.evaluate(`(() => {
+      const api = window.__townShowcase;
+      const meshes = api.constructionSnapshot('townHall');
+      const baseline = ${JSON.stringify(baseline)};
+      const original = new Set(baseline.map((mesh) => mesh.geometryUuid));
+      return {
+        allOriginal: meshes.every((mesh) => original.has(mesh.geometryUuid)),
+        currentVisible: meshes.some((mesh) => mesh.stage === ${JSON.stringify(stage.id)} && mesh.visible),
+        moved: meshes.some((mesh) => {
+          const base = baseline.find((candidate) => candidate.uuid === mesh.uuid);
+          return base && mesh.position.some((value, index) => value !== base.position[index]);
+        }),
+      };
+    })()`);
+    assert.ok(stageState.allOriginal, `${stage.id} replaced original geometry`);
+    assert.ok(stageState.currentVisible, `${stage.id} has no visible real component`);
+    assert.ok(stageState.moved, `${stage.id} did not animate real component transforms`);
+    assert.equal((await client.evaluate('window.__townShowcase.rendererStats()')).highlights, 1);
+    await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    await client.assert("document.querySelector('.h3-town-scene canvas').getContext('webgl2').getError() === 0", `${stage.id} produced a WebGL error`);
+  }
+
+  const duration = stages.at(-1).end;
+  for (const target of [duration * 0.82, duration * 0.14, duration * 0.61, 0, duration * 0.33]) {
+    const equal = await client.evaluate(`(() => {
+      const api = window.__townShowcase;
+      api.scrubConstruction(${duration} * 0.93);
+      api.scrubConstruction(${duration} * 0.07);
+      api.scrubConstruction(${target});
+      const scrubbed = JSON.stringify(api.constructionSnapshot('townHall'));
+      api.scrubConstruction(0);
+      api.scrubConstruction(${target});
+      return scrubbed === JSON.stringify(api.constructionSnapshot('townHall'));
+    })()`);
+    assert.ok(equal, `Forward/backward scrubbing was not deterministic at ${target}`);
+  }
+
+  const storeStable = await client.evaluate(`(() => {
+    const api = window.__townShowcase;
+    api.scrubConstruction(${duration} * 0.43);
+    const beforeTime = api.constructionStatus().time;
+    const before = JSON.stringify(api.constructionSnapshot('townHall'));
+    api.reloadStore();
+    return beforeTime === api.constructionStatus().time && before === JSON.stringify(api.constructionSnapshot('townHall'));
+  })()`);
+  assert.ok(storeStable, 'An unrelated store update disturbed timeline time or model sampling');
+
+  for (const speed of [0.5, 1, 2, 4]) {
+    const result = await client.evaluate(`(async () => {
+      const api = window.__townShowcase;
+      api.scrubConstruction(0.2);
+      api.speedConstruction(${speed});
+      api.playConstruction();
+      const before = api.constructionStatus().time;
+      const started = performance.now();
+      await new Promise((resolve) => setTimeout(resolve, 280));
+      const after = api.pauseConstruction();
+      return { elapsed: after.time - before, wall: (performance.now() - started) / 1000, speed: after.speed };
+    })()`);
+    assert.equal(result.speed, speed);
+    assert.ok(result.elapsed > 0, `${speed}x playback did not advance`);
+    assert.ok(Math.abs(result.elapsed / result.wall - speed) < 0.22, `${speed}x playback advanced at the wrong rate: ${JSON.stringify(result)}`);
+  }
+
+  await client.evaluate(`window.__townShowcase.scrubConstruction(${stages[2].start})`);
+  assert.equal((await client.evaluate('window.__townShowcase.nextConstructionStage()')).stageIndex, 3);
+  assert.equal((await client.evaluate('window.__townShowcase.previousConstructionStage()')).stageIndex, 2);
+  await client.click('[aria-label="Play construction animation"]');
+  await client.waitFor("document.querySelector('.h3-town-scene__construction-controls').dataset.playing === 'true'");
+  await client.click('[aria-label="Pause construction animation"]');
+  const pausedTime = await client.evaluate('window.__townShowcase.constructionStatus().time');
+  await client.evaluate('new Promise((resolve) => setTimeout(resolve, 100))');
+  assert.equal(await client.evaluate('window.__townShowcase.constructionStatus().time'), pausedTime, 'Pause did not freeze the timeline');
+  await client.evaluate(`(() => {
+    const range = document.querySelector('.h3-town-scene__construction-progress input');
+    range.value = ${duration} * 0.66;
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  assert.ok(Math.abs((await client.evaluate('window.__townShowcase.constructionStatus()')).time - duration * 0.66) < 0.02, 'Draggable progress did not scrub the model');
+
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  await client.waitFor("document.querySelector('.h3-town-scene canvas').clientWidth === 390");
+  await client.assert(`(() => {
+    const controls = document.querySelector('.h3-town-scene__construction-controls').getBoundingClientRect();
+    return controls.left >= 0 && controls.right <= innerWidth && controls.top >= 0 && controls.bottom <= innerHeight;
+  })()`, 'Construction controls overflow the mobile viewport');
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await client.waitFor("document.querySelector('.h3-town-scene canvas').clientWidth === 1280");
+
+  const final = await client.evaluate('window.__townShowcase.finishConstruction()');
+  assert.equal(final.completed, true);
+  assert.equal(final.playing, false);
+  const finalMeshes = await client.evaluate("window.__townShowcase.constructionSnapshot('townHall')");
+  assert.deepEqual(finalMeshes, baseline, 'Final construction state differs from the original completed model');
+  assert.ok(finalMeshes.every((mesh) => baselineGeometries.has(mesh.geometryUuid)), 'Final model geometry was replaced');
+
+  const reduced = await client.evaluate("window.__townShowcase.startConstruction('townHall', { reducedMotion: true })");
+  assert.equal(reduced.completed, true, 'Reduced motion did not finalize immediately');
+  assert.equal(reduced.reducedMotion, true);
+  assert.deepEqual(await client.evaluate("window.__townShowcase.constructionSnapshot('townHall')"), baseline);
+
+  await client.evaluate('window.__townShowcase.cancelConstruction()');
+  await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const resourcesBefore = await client.evaluate('window.__townShowcase.rendererStats()');
+  for (let index = 0; index < 3; index += 1) {
+    await client.evaluate("window.__townShowcase.startConstruction('townHall', { autoplay: false })");
+    assert.equal((await client.evaluate('window.__townShowcase.rendererStats()')).highlights, 1);
+    await client.evaluate('window.__townShowcase.cancelConstruction()');
+  }
+  await client.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const resourcesAfter = await client.evaluate('window.__townShowcase.rendererStats()');
+  assert.equal(resourcesAfter.highlights, 0, 'Cancelled construction left a highlighter in the scene');
+  assert.equal(resourcesAfter.geometries, resourcesBefore.geometries, 'Construction highlight geometries leaked');
+  assert.equal(resourcesAfter.textures, resourcesBefore.textures, 'Construction leaked GPU textures');
+
+  await client.evaluate("window.__townShowcase.setTown('haven', true)");
+  await client.evaluate("window.__townShowcase.startConstruction('mageGuild', { reducedMotion: true })");
+  const ambientBefore = await client.evaluate("window.__townShowcase.constructionSnapshot('mageGuild').find((mesh) => mesh.animation === 'float')");
+  assert.ok(ambientBefore, 'Mage Guild ambient test mesh is missing');
+  await client.evaluate('new Promise((resolve) => setTimeout(resolve, 180))');
+  const ambientAfter = await client.evaluate("window.__townShowcase.constructionSnapshot('mageGuild').find((mesh) => mesh.animation === 'float')");
+  assert.notDeepEqual(ambientAfter.position, ambientBefore.position, 'Completed construction froze the original ambient mesh animation');
+  const restoredAmbient = await client.evaluate(`(() => {
+    const api = window.__townShowcase;
+    const stages = api.constructionStages();
+    api.scrubConstruction(stages.at(-1).end);
+    return api.constructionSnapshot('mageGuild').find((mesh) => mesh.animation === 'float');
+  })()`);
+  assert.deepEqual(restoredAmbient.position, ambientBefore.position, 'Explicitly scrubbing to the end did not restore the exact base transform');
+
+  await client.evaluate("window.__townShowcase.startConstruction('townHall', { autoplay: false })");
+  await client.evaluate('window.__townShowcase.clearTown()');
+  assert.equal(await client.evaluate('window.__townShowcase.constructionStatus()'), null, 'Town exit did not cancel construction');
+  await client.assert("document.querySelector('.h3-town-scene__construction-controls').hidden", 'Town exit left construction controls visible');
+  console.log('Town WebGL construction passed: confirmed start, 8 stages, original meshes, scrubbing, speeds, controls, reduced motion, final equality, and cleanup.');
+}
+
 await access(chromePath);
 const profile = await mkdtemp(resolve(projectRoot, '.town-showcase-'));
 const chromeErrors = [];
@@ -307,15 +474,17 @@ try {
     console.log(`Town WebGL showcase: ${faction} passed all nine built/unbuilt models and interactions`);
   }
   assert.equal(covered.size, 114, 'Not every building ID was covered in both construction states');
+  await exerciseConstructionTimeline(client);
   await client.evaluate('window.__townShowcase.clearTown()');
   await client.assert("document.querySelector('.h3-town-scene').dataset.buildingCount === '0' && !document.querySelector('.h3-town-scene__label') && !document.querySelector('.h3-town-scene__building')", 'setTown(null) left building visuals or keyboard destinations behind');
   await client.assert('window.__townShowcase.subscriptionCount() === 1', 'setTown(null) should retain the single reusable store subscription');
   await client.evaluate('window.__townShowcase.setTown("haven", true)');
   await client.waitFor("document.querySelector('.h3-town-scene').dataset.buildingCount === '9'");
+  await client.evaluate("window.__townShowcase.startConstruction('townHall', { autoplay: false })");
   await client.evaluate('window.__townShowcase.dispose()');
-  await client.assert("!document.querySelector('.h3-town-scene') && window.__townShowcase.subscriptionCount() === 0", 'Dispose left DOM or store subscriptions behind');
+  await client.assert("!document.querySelector('.h3-town-scene') && window.__townShowcase.subscriptionCount() === 0 && window.__townShowcase.constructionStatus() === null", 'Dispose left DOM, an active timeline, or store subscriptions behind');
   if (client.exceptions.length) throw new Error(`Browser exceptions:\n${client.exceptions.join('\n')}`);
-  console.log('Town WebGL showcase passed: 13 factions, 57 building IDs in both states, 114 exact interaction variants, raycasts, camera, resize, and cleanup.');
+  console.log('Town WebGL showcase passed: 13 factions, 57 building IDs in both states, 114 exact interaction variants, deterministic construction, raycasts, camera, resize, and cleanup.');
 } catch (error) {
   if (chromeErrors.length) console.error(chromeErrors.join(''));
   throw error;

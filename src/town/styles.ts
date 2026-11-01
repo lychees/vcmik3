@@ -223,6 +223,47 @@ export const TOWN_SCENE_STYLES = `
   white-space: nowrap;
   border: 0;
 }
+.h3-town-scene__construction-controls {
+  position: absolute;
+  z-index: 6;
+  left: 14px;
+  bottom: 50px;
+  width: min(430px, calc(100% - 270px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 227, 138, .48);
+  border-radius: 10px;
+  background: rgba(22, 35, 36, .95);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .3);
+  color: #f8f1d9;
+}
+.h3-town-scene__construction-heading { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.h3-town-scene__construction-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ffe39a; font: 700 13px/1.2 Georgia, serif; }
+.h3-town-scene__construction-heading span { color: #d9e2d0; font-size: 10px; }
+.h3-town-scene__construction-transport { display: flex; gap: 4px; align-items: center; }
+.h3-town-scene__construction-controls button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid rgba(245, 221, 157, .28);
+  border-radius: 6px;
+  background: #354b48;
+  color: #fff4d4;
+  font: 700 11px/1 sans-serif;
+  cursor: pointer;
+}
+.h3-town-scene__construction-controls button:hover { background: #4a635b; border-color: #e7ca78; }
+.h3-town-scene__construction-controls button:disabled { opacity: .42; cursor: default; }
+.h3-town-scene__construction-controls button:focus-visible,
+.h3-town-scene__construction-controls input:focus-visible { outline: 2px solid #ffe293; outline-offset: 2px; }
+.h3-town-scene__construction-progress { min-width: 0; display: grid; grid-template-columns: auto minmax(70px, 1fr); align-items: center; gap: 7px; font-size: 9px; color: #cbd7c5; }
+.h3-town-scene__construction-progress input { width: 100%; min-width: 0; height: 22px; margin: 0; accent-color: #ffe38a; cursor: ew-resize; }
+.h3-town-scene__construction-speeds { display: flex; gap: 3px; }
+.h3-town-scene__construction-speeds button { min-width: 34px; padding-inline: 4px; font-size: 10px; }
+.h3-town-scene__construction-speeds button[aria-pressed="true"] { color: #263b36; background: #ffe38a; border-color: #ffe38a; }
+.h3-town-scene__construction-component { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #b9cabb; font-size: 9px; }
 @media (max-width: 760px) {
   .h3-town-scene__header { top: 8px; left: 8px; max-width: calc(100% - 205px); padding: 8px 10px; }
   .h3-town-scene__header h2 { font-size: 16px; }
@@ -246,5 +287,19 @@ export const TOWN_SCENE_STYLES = `
   .h3-town-scene__label { max-width: 110px; padding: 3px 5px; font-size: 8px; }
   .h3-town-scene__label-status { display: none; }
   .h3-town-scene__hint { display: none; }
+  .h3-town-scene__construction-controls {
+    left: 8px;
+    right: 8px;
+    bottom: calc(31% + 16px);
+    width: auto;
+    gap: 5px 8px;
+    padding: 8px;
+  }
+  .h3-town-scene__construction-controls button { min-width: 28px; min-height: 28px; }
+  .h3-town-scene__construction-speeds button { min-width: 30px; }
+  .h3-town-scene__construction-component { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .h3-town-scene__construction-controls * { scroll-behavior: auto; }
 }
 `;

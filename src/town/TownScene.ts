@@ -4,6 +4,16 @@ import type { GameStore } from '../game/GameStore';
 import { FACTIONS } from '../game/factions';
 import type { GameState, TownState } from '../game/types';
 import { FACTION_ARCHITECTURE } from './architecture';
+import {
+  ConstructionClock,
+  ConstructionModelAnimation,
+  createConstructionTimeline,
+  type ConstructionSpeed,
+  type ConstructionStartOptions,
+  type ConstructionStatus,
+  type ConstructionTimeline,
+} from './construction';
+import { ConstructionControls } from './ConstructionControls';
 import { createTownEnvironment } from './environment';
 import { createTownLayout, type TownBuildingPlacement } from './layout';
 import { createBuildingModel, disposeTownObject } from './models';
@@ -35,6 +45,15 @@ interface PointerGesture {
   lastX: number;
   lastY: number;
   dragging: boolean;
+}
+
+interface ActiveConstruction {
+  timeline: ConstructionTimeline;
+  clock: ConstructionClock;
+  animation: ConstructionModelAnimation;
+  reducedMotion: boolean;
+  lastStageId: string;
+  lastComponentId: string;
 }
 
 const MIN_ZOOM = 0.55;
@@ -79,6 +98,8 @@ export class TownScene {
   private readonly tooltip: HTMLDivElement;
   private readonly empty: HTMLDivElement;
   private readonly status: HTMLDivElement;
+  private readonly constructionControls: ConstructionControls;
+  private readonly motionQuery: MediaQueryList | null;
   private readonly townRoot = new THREE.Group();
   private readonly selectionRing = createRing(0xffdc78);
   private readonly hoverRing = createRing(0x91edc4);
@@ -90,6 +111,7 @@ export class TownScene {
   private readonly unsubscribe: () => void;
   private readonly visuals = new Map<string, BuildingVisual>();
   private readonly animated = new Set<THREE.Object3D>();
+  private activeConstruction: ActiveConstruction | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private restoreContainerPosition: string | null = null;
   private pointerGesture: PointerGesture | null = null;
@@ -192,6 +214,17 @@ export class TownScene {
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
     this.root.appendChild(this.status);
+    this.constructionControls = new ConstructionControls(this.root, {
+      playPause: () => this.activeConstruction?.clock.playing ? this.pauseConstruction() : this.playConstruction(),
+      scrub: (time) => this.setConstructionTime(time),
+      speed: (speed) => this.setConstructionSpeed(speed),
+      previous: () => this.previousConstructionStage(),
+      next: () => this.nextConstructionStage(),
+    });
+    this.motionQuery = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)')
+      : null;
+    this.motionQuery?.addEventListener('change', this.onReducedMotion, { signal: this.abort.signal });
     container.appendChild(this.root);
 
     this.scene.background = new THREE.Color(0x718f88);
@@ -367,6 +400,9 @@ export class TownScene {
   }
 
   private replaceVisualModel(visual: BuildingVisual, built: boolean): void {
+    const buildingId = visual.placement.spec.id;
+    if (this.activeConstruction?.timeline.buildingId === buildingId) this.cancelConstruction();
+    const wasBuilt = visual.built;
     visual.root.remove(visual.model);
     disposeTownObject(visual.model);
     visual.model = createBuildingModel(visual.placement.spec, this.faction!, built);
@@ -374,6 +410,7 @@ export class TownScene {
     visual.root.add(visual.model);
     this.refreshVisual(visual);
     this.collectAnimated();
+    if (built && !wasBuilt && this.townId) this.startConstruction(this.townId, buildingId);
   }
 
   private refreshVisual(visual: BuildingVisual): void {
@@ -439,6 +476,7 @@ export class TownScene {
 
   private clearTown(): void {
     this.renderer.setAnimationLoop(null);
+    this.cancelConstruction();
     this.clearHover();
     this.selectedId = null;
     this.selectionRing.visible = false;
@@ -451,6 +489,160 @@ export class TownScene {
     this.labels.replaceChildren();
     this.buildingList.replaceChildren();
   }
+
+  startConstruction(
+    townId: string,
+    buildingId: string,
+    options: ConstructionStartOptions = {},
+  ): ConstructionStatus | null {
+    if (this.disposed || this.townId !== townId) return null;
+    const visual = this.visuals.get(buildingId);
+    if (!visual?.built) return null;
+    this.cancelConstruction();
+    const timeline = createConstructionTimeline(townId, buildingId);
+    const animation = new ConstructionModelAnimation(visual.model, timeline, this.scene);
+    const clock = new ConstructionClock(timeline, options.speed ?? 1);
+    const reducedMotion = options.reducedMotion ?? this.motionQuery?.matches ?? false;
+    this.activeConstruction = { timeline, animation, clock, reducedMotion, lastStageId: '', lastComponentId: '' };
+    this.root.dataset.constructionBuildingId = buildingId;
+    this.selectBuilding(buildingId);
+    const now = performance.now();
+    if (reducedMotion) clock.seek(timeline.duration, now);
+    else if (options.autoplay === false) clock.seek(0, now);
+    else clock.play(now);
+    this.status.textContent = `${BUILDINGS[buildingId]!.name} construction timeline started.`;
+    return this.updateConstruction(now);
+  }
+
+  playConstruction(): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active || this.disposed) return null;
+    const now = performance.now();
+    if (active.reducedMotion) active.clock.seek(active.timeline.duration, now);
+    else active.clock.play(now);
+    return this.updateConstruction(now);
+  }
+
+  pauseConstruction(): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active || this.disposed) return null;
+    const now = performance.now();
+    active.clock.pause(now);
+    return this.updateConstruction(now);
+  }
+
+  setConstructionTime(time: number): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active || this.disposed) return null;
+    const now = performance.now();
+    active.clock.seek(time, now);
+    return this.updateConstruction(now, true);
+  }
+
+  setConstructionSpeed(speed: ConstructionSpeed): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active || this.disposed) return null;
+    const now = performance.now();
+    active.clock.setSpeed(speed, now);
+    return this.updateConstruction(now);
+  }
+
+  previousConstructionStage(): ConstructionStatus | null {
+    return this.goToConstructionStage(-1);
+  }
+
+  nextConstructionStage(): ConstructionStatus | null {
+    return this.goToConstructionStage(1);
+  }
+
+  private goToConstructionStage(direction: number): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active || this.disposed) return null;
+    const now = performance.now();
+    const sample = active.clock.pause(now);
+    const index = Math.max(0, Math.min(7, sample.stageIndex + direction));
+    const stage = active.timeline.stages[index]!;
+    active.clock.seek(stage.start + stage.duration * 0.5, now);
+    return this.updateConstruction(now);
+  }
+
+  getConstructionStatus(): ConstructionStatus | null {
+    if (!this.activeConstruction || this.disposed) return null;
+    return this.updateConstruction(performance.now());
+  }
+
+  finishConstruction(): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active || this.disposed) return null;
+    const now = performance.now();
+    active.clock.pause(now);
+    active.clock.seek(active.timeline.duration, now);
+    return this.updateConstruction(now, true);
+  }
+
+  cancelConstruction(): void {
+    if (!this.activeConstruction) return;
+    this.activeConstruction.animation.dispose();
+    this.activeConstruction = null;
+    this.constructionControls.hide();
+    delete this.root.dataset.constructionBuildingId;
+    delete this.root.dataset.constructionStage;
+    delete this.root.dataset.constructionPlaying;
+    delete this.root.dataset.constructionTime;
+    delete this.root.dataset.constructionSpeed;
+  }
+
+  private updateConstruction(now: number, forceCompletedSample = false): ConstructionStatus | null {
+    const active = this.activeConstruction;
+    if (!active) return null;
+    const clockSample = active.clock.tick(now);
+    const sampled = forceCompletedSample || !clockSample.completed || active.lastComponentId !== 'complete'
+      ? active.animation.sample(clockSample.time)
+      : null;
+    const component = sampled?.component ?? null;
+    const sample = clockSample;
+    const buildingName = BUILDINGS[active.timeline.buildingId]!.name;
+    const status: ConstructionStatus = {
+      townId: active.timeline.townId,
+      buildingId: active.timeline.buildingId,
+      buildingName,
+      time: sample.time,
+      duration: active.timeline.duration,
+      progress: sample.progress,
+      speed: active.clock.speed,
+      playing: active.clock.playing,
+      completed: sample.completed,
+      reducedMotion: active.reducedMotion,
+      stageIndex: sample.stageIndex,
+      stageId: sample.stage.id,
+      stageLabel: sample.stage.label,
+      stageProgress: sample.stageProgress,
+      component,
+    };
+    this.root.dataset.constructionStage = sample.stage.id;
+    this.root.dataset.constructionPlaying = String(sample.completed ? false : active.clock.playing);
+    this.root.dataset.constructionTime = sample.time.toFixed(3);
+    this.root.dataset.constructionSpeed = String(active.clock.speed);
+    this.constructionControls.update(status);
+    if (active.lastStageId !== sample.stage.id) {
+      this.status.textContent = `${buildingName}: ${sample.stage.label} stage ${sample.stageIndex + 1} of 8.`;
+      active.lastStageId = sample.stage.id;
+    }
+    if (sample.completed && active.lastComponentId !== 'complete') {
+      this.status.textContent = `${buildingName} construction animation complete.`;
+      active.lastComponentId = 'complete';
+    } else if (!sample.completed) {
+      active.lastComponentId = component?.id ?? '';
+    }
+    return status;
+  }
+
+  private readonly onReducedMotion = (event: MediaQueryListEvent): void => {
+    if (!this.activeConstruction) return;
+    this.activeConstruction.reducedMotion = event.matches;
+    if (event.matches) this.finishConstruction();
+    else this.updateConstruction(performance.now());
+  };
 
   private activateBuilding(buildingId: string): void {
     if (this.disposed || !this.townId) return;
@@ -758,6 +950,7 @@ export class TownScene {
         object.scale.setScalar(scale);
       }
     }
+    this.updateConstruction(time);
     this.positionLabels();
     this.renderer.render(this.scene, this.camera);
   };
@@ -771,6 +964,7 @@ export class TownScene {
     this.resizeObserver = null;
     this.renderer.setAnimationLoop(null);
     this.clearTown();
+    this.constructionControls.dispose();
     disposeTownObject(this.scene);
     this.renderer.renderLists.dispose();
     this.renderer.dispose();

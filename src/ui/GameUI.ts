@@ -1,6 +1,7 @@
 import '../styles.css';
 import '../town/factions';
-import { TownScene, type TownBuildingInteraction } from '../town/TownScene';
+import type { TownBuildingInteraction } from '../town/TownScene';
+import { ConfirmedConstructionTownScene, ConstructionConfirmation } from './constructionPlayback';
 import { MAX_ARMY_STACKS } from '../game/army';
 import {
   ARTIFACT_SLOTS,
@@ -79,7 +80,8 @@ export class GameUI {
   private lastBattleId: string | null;
   private activeTownId: string | null = null;
   private townTab: TownTab = 'overview';
-  private townScene: TownScene | null = null;
+  private readonly constructionConfirmation = new ConstructionConfirmation();
+  private townScene: ConfirmedConstructionTownScene | null = null;
   private townScreenTownId: string | null = null;
   private focusedTownBuildingId: string | null = null;
   private focusedCreatureId: string | null = null;
@@ -388,7 +390,12 @@ export class GameUI {
         </div>`;
       const host = layer.querySelector<HTMLElement>('.h3-town-scene-host');
       if (!host) throw new Error('Town scene host could not be created');
-      this.townScene = new TownScene(host, this.store, this.handleTownBuildingInteraction);
+      this.townScene = new ConfirmedConstructionTownScene(
+        host,
+        this.store,
+        this.handleTownBuildingInteraction,
+        this.constructionConfirmation,
+      );
       this.townScreenTownId = town.id;
       this.townScene.setTown(town.id);
     }
@@ -961,7 +968,11 @@ export class GameUI {
         { label: 'Cancel', className: 'is-secondary' },
         { label: 'Construct building', icon: 'check', autofocus: true, onSelect: () => {
           if (this.activeTownId !== townId) return;
-          const result = this.store.constructBuilding(townId, buildingId);
+          const result = this.constructionConfirmation.run(
+            townId,
+            buildingId,
+            () => this.store.constructBuilding(townId, buildingId),
+          );
           if (!result.ok) this.notify('Construction unavailable', result.error, 'error');
           else this.notify('Construction complete', `${building.name} now stands in ${result.value.name}.`, 'success');
         } },
@@ -1079,6 +1090,7 @@ export class GameUI {
         <section><h3>${icon('compass')} Adventure camera</h3><p><strong>Left-drag</strong> or <strong>middle-drag</strong> to pan. <strong>Right-drag</strong> rotates and adjusts pitch. Use the <strong>mouse wheel</strong> or <strong>Ctrl + wheel</strong> to zoom; <strong>Shift + wheel</strong> pans.</p><p><kbd>Arrow keys</kbd> pan, <kbd>Q</kbd>/<kbd>E</kbd> rotate, <kbd>+</kbd>/<kbd>−</kbd> zoom, and <kbd>F</kbd> focuses the selected hero.</p></section>
         <section><h3>${icon('castle')} Towns & armies</h3><p>Every faction’s buildings appear in its interactive 3D town. Click a built dwelling for its recruitment card, the Fort for army transfers, the Mage Guild for the visiting hero’s spellbook, or a civic building for economy details.</p><p>Click an unbuilt model to focus its construction card. Costs, prerequisites, the one-project-per-day limit, and confirmation still apply. Creature growth arrives weekly; income arrives daily.</p></section>
         <section><h3>${icon('construction')} Town model & keyboard</h3><p>Drag to pan, right-drag to rotate, and use the wheel or camera buttons to zoom. The Town buildings list provides a button for every model, including touch and keyboard access.</p><p>On the town canvas, <kbd>Arrow keys</kbd> pan, <kbd>Q</kbd>/<kbd>E</kbd> rotate, <kbd>[</kbd>/<kbd>]</kbd> select buildings, and <kbd>Enter</kbd> activates the selection. Use the town tabs for the same functions without clicking a model.</p></section>
+        <section><h3>${icon('construction')} Construction playback</h3><p>A confirmed building assembles through eight stages. Use the stage arrows, Play/Pause/Replay, or the Progress slider; the slider supports <kbd>Arrow keys</kbd>, <kbd>Home</kbd>, and <kbd>End</kbd>. Speed controls range from 0.5× to 4×.</p><p>Playback is cosmetic and never changes construction costs or building rules. Reduced-motion preferences show the finished model immediately while retaining static stage controls. Leaving town or loading a campaign ends playback without undoing the building.</p></section>
         <section><h3>${icon('endTurn')} Turns & battle</h3><p>End the turn to restore hero movement and mana, collect town and mine income, and allow opposing players to act. Monday brings new creature growth.</p><p>Moving onto hostile forces creates a battle handoff. The tactical battlefield takes control; adventure commands resume only after its result is applied to the campaign.</p></section>
         <section><h3>${icon('spark')} Hero magic</h3><p>Heroes can know up to 19 spells across four schools. Cast once per round during your own army’s turn, with valid targets and enough mana. Mass and hero-targeted spells resolve immediately; ally and enemy spells use highlighted targets.</p><p>Spell Power strengthens expanded effects. Mana spent in tactical combat is returned with the result and preserved in saves.</p></section>
         <section><h3>${icon('shield')} Resources & equipment</h3><p>The realm tracks gold, six classic materials, mithril, obsidian, and essence. Collect caches and claim mines for daily income; advanced construction spends all ten types.</p><p>Twenty artifact pickups wait on the map. Open Equipment in the hero panel to equip or unequip five slots. Only equipped artifacts add Attack, Defense, Spell Power, and Knowledge.</p></section>
