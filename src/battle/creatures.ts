@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { createHotaCreature, HOTA_CREATURE_FACTIONS } from './hotaCreatures';
+import { createNeutralCreatureModel, isNeutralCreatureId } from './neutral';
 import type { BattleSideId } from './types';
 
 const PALETTES: Record<string, { body: number; accent: number; dark: number }> = {
@@ -359,6 +360,7 @@ const EXPANSION_MODELS: Record<string, { faction: 'Ember' | 'Mire'; archetype: s
 };
 
 export function getCreatureVisualFaction(creatureId: string): string | undefined {
+  if (isNeutralCreatureId(creatureId)) return 'Neutral';
   const hotaFaction = HOTA_CREATURE_FACTIONS[creatureId];
   if (hotaFaction) return hotaFaction;
   const expansionFaction = EXPANSION_MODELS[creatureId]?.faction;
@@ -376,7 +378,9 @@ export function createCreatureModel(
   const group = new THREE.Group();
   const expansion = EXPANSION_MODELS[creatureId];
   const hota = createHotaCreature(creatureId);
-  if (hota) group.add(hota.group);
+  const neutral = createNeutralCreatureModel(creatureId, side);
+  if (neutral) group.add(neutral);
+  else if (hota) group.add(hota.group);
   else if (expansion) expansion.build(group);
   else if (creatureId === 'cavalier' || creatureId === 'unicorn') addHorse(group, creatureId);
   else if (creatureId === 'griffin') addGriffin(group);
@@ -387,7 +391,7 @@ export function createCreatureModel(
   const size = bounds.getSize(new THREE.Vector3());
   const visualHeight = Number.isFinite(size.y) ? size.y : 1.6;
   if (options.factionRing !== false) {
-    const ringRadius = hota ? THREE.MathUtils.clamp(Math.max(size.x, size.z) * 0.38, 0.48, 0.78) : 0.5;
+    const ringRadius = hota || neutral ? THREE.MathUtils.clamp(Math.max(size.x, size.z) * 0.38, 0.48, 0.78) : 0.5;
     const factionRing = new THREE.Mesh(
       new THREE.TorusGeometry(ringRadius, 0.035, 5, 18),
       material(side === 'attacker' ? 0x65bfe3 : 0xe17868, { emissive: side === 'attacker' ? 0x163b4a : 0x491b17 }),
@@ -397,17 +401,17 @@ export function createCreatureModel(
     factionRing.name = 'faction-ring';
     group.add(factionRing);
   }
-  group.rotation.y = side === 'attacker' ? 0 : Math.PI;
+  group.rotation.y = neutral ? 0 : side === 'attacker' ? 0 : Math.PI;
   group.name = `creature-${creatureId}`;
   group.userData.creatureId = creatureId;
-  group.userData.faction = hota?.faction ?? getCreatureVisualFaction(creatureId) ?? 'Haven';
-  group.userData.archetype = hota?.archetype ?? expansion?.archetype ?? creatureId;
+  group.userData.faction = neutral ? 'Neutral' : hota?.faction ?? getCreatureVisualFaction(creatureId) ?? 'Haven';
+  group.userData.archetype = neutral?.userData.archetype ?? hota?.archetype ?? expansion?.archetype ?? creatureId;
   group.userData.animationPivot = 'ground';
   group.userData.side = side;
   group.userData.visualHeight = visualHeight;
   group.userData.labelHeight = Math.max(1.85, bounds.max.y + 0.45);
   const palette = PALETTES[creatureId] ?? PALETTES.militia!;
-  group.userData.palette = hota?.palette ?? [palette.body, palette.accent, palette.dark];
+  group.userData.palette = neutral?.userData.palette ?? hota?.palette ?? [palette.body, palette.accent, palette.dark];
   group.userData.factionColor = group.userData.palette[0];
   return group;
 }

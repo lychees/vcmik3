@@ -1,4 +1,5 @@
 import { getCreature } from '../game/content';
+import type { ExpandedSpellDefinition } from '../game/spells';
 import type { BattleSetup } from '../game/types';
 import { BattleEngine } from './BattleEngine';
 import { hexDistance } from './hex';
@@ -36,6 +37,51 @@ function enemyThreat(stack: BattleStackState): number {
   return averageDamage(stack) + creature.tier * 8 + (creature.abilities.includes('ranged') ? 18 : 0);
 }
 
+function scoreExpandedSpell(
+  engine: BattleEngine,
+  side: BattleSideId,
+  spell: ExpandedSpellDefinition,
+  targetId?: string,
+): number {
+  const targetIds = targetId ? [targetId] : engine.getSpellTargets(spell.id, side);
+  const stacks = targetIds.map((id) => engine.getStack(id)).filter((stack): stack is BattleStackState => Boolean(stack));
+  const effect = spell.effect;
+  if (effect.kind === 'chainDamage' || effect.kind === 'massDamage') {
+    const initial = targetId ? engine.getStack(targetId) : undefined;
+    const affected = effect.kind === 'chainDamage' && initial
+      ? [initial, ...engine.getLivingStacks(side === 'attacker' ? 'defender' : 'attacker').filter((stack) => stack.id !== initial.id)]
+      : stacks;
+    const raw = engine.getSpellAmount(spell.id, side);
+    let score = 0;
+    affected.slice(0, effect.kind === 'chainDamage' ? effect.maxTargets : undefined).forEach((target, index) => {
+      const resistance = getCreature(target.creatureId).abilities.includes('spellResistance') ? 0.5 : 1;
+      const damage = Math.max(1, Math.floor(raw * (effect.kind === 'chainDamage' ? effect.falloff ** index : 1) * resistance));
+      const useful = Math.min(engine.getStackHealth(target), damage);
+      const direction = target.side === side && spell.target === 'all' ? -0.8 : 1;
+      score += useful * direction + (damage >= engine.getStackHealth(target) ? 100 * direction : 0);
+      if (target.side !== side) score += enemyThreat(target) * 0.12;
+    });
+    return (score + affected.length * 5) * 0.75;
+  }
+  if (effect.kind === 'restoration') {
+    const amount = engine.getSpellAmount(spell.id, side);
+    return stacks.reduce((score, target) => {
+      const missing = engine.getStackMaxHealth(target) - engine.getStackHealth(target);
+      return score + Math.min(missing, amount) * 1.5 + (target.count === 0 ? 240 : 0) + enemyThreat(target) * 0.15;
+    }, 20);
+  }
+  if (effect.kind === 'status') {
+    if (spell.id === 'mireHex') return 22 + stacks.reduce((score, stack) => score + enemyThreat(stack) * 0.2, 0);
+    if (spell.id === 'graniteAegis') return 18 + stacks.reduce((score, stack) => score + enemyThreat(stack) * 0.4, 0);
+    if (spell.id === 'battleFervor') return 18 + stacks.reduce((score, stack) => score + averageDamage(stack) * 0.3, 0);
+    return 20 + stacks.reduce((score, stack) => score + averageDamage(stack) * 0.15 + Math.max(0, 8 - engine.getStackSpeed(stack)) * 3, 0);
+  }
+  if (effect.kind === 'manaRestore') return 18 + engine.getSpellAmount(spell.id, side);
+  const enemy = engine.getHero(side === 'attacker' ? 'defender' : 'attacker');
+  const affected = Math.min(enemy?.mana ?? 0, engine.getSpellAmount(spell.id, side));
+  return (effect.kind === 'manaDrain' ? 32 : 22) + affected * 2;
+}
+
 export function chooseAiSpell(engine: BattleEngine, side: BattleSideId): AiSpellDecision | null {
   const hero = engine.getHero(side);
   const active = engine.getActiveStack();
@@ -44,6 +90,14 @@ export function chooseAiSpell(engine: BattleEngine, side: BattleSideId): AiSpell
   for (const spell of engine.getSpellbook(side)) {
     if (hero.mana < spell.manaCost) continue;
     const targets = engine.getSpellTargets(spell.id, side);
+    if (typeof spell.effect !== 'string') {
+      const choices: (string | undefined)[] = spell.target === 'ally' || spell.target === 'enemy' ? targets : [undefined];
+      for (const targetId of choices) {
+        if (!engine.canCastSpell(spell.id, side, targetId).ok) continue;
+        candidates.push({ spellId: spell.id, targetId, score: scoreExpandedSpell(engine, side, spell, targetId) });
+      }
+      continue;
+    }
     if (spell.target === 'allEnemies') {
       const enemies = engine.getLivingStacks(side === 'attacker' ? 'defender' : 'attacker');
       if (enemies.length === 0) continue;
@@ -149,8 +203,12 @@ export function performAiTurn(engine: BattleEngine): BattleActionResult<BattleEv
   const spell = chooseAiSpell(engine, active.side);
   if (spell) {
     const cast = engine.castSpell(spell.spellId, active.side, spell.targetId);
-    if (cast.ok) events.push(...cast.value);
-    if (engine.getResult()) return { ok: true, value: events };
+    if (cast.ok) {
+      events.push(...cast.value);
+      if (engine.getResult() || active.count <= 0 || engine.getActiveStack()?.id !== active.id) {
+        return { ok: true, value: events };
+      }
+    }
   }
   const action = chooseAiAction(engine);
   let result: BattleActionResult<BattleEvent[]>;

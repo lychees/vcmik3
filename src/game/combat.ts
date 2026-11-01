@@ -98,11 +98,13 @@ export function cloneBattleSetup(setup: BattleSetup): BattleSetup {
       ...setup.attacker,
       primarySkills: { ...setup.attacker.primarySkills },
       army: cloneArmy(setup.attacker.army),
+      spells: setup.attacker.spells ? [...setup.attacker.spells] : undefined,
     },
     defender: {
       ...setup.defender,
       primarySkills: { ...setup.defender.primarySkills },
       army: cloneArmy(setup.defender.army),
+      spells: setup.defender.spells ? [...setup.defender.spells] : undefined,
     },
     rewards: { experience: setup.rewards.experience, resources: { ...setup.rewards.resources } },
   };

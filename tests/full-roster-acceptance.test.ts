@@ -222,7 +222,7 @@ describe('full-roster construction, recruitment, and persistence', () => {
   });
 });
 
-describe('all 52 units in tactical combat', () => {
+describe('all 72 units in tactical combat', () => {
   it.each(Object.values(CREATURES))('$id enters and resolves a valid tactical battle', (creature) => {
     const setup = setupForCreature(creature.id);
     const engine = runTacticalAutoBattle(setup, { obstacles: [] });

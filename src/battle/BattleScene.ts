@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getSpell } from '../game/content';
+import { getCombatSpell } from '../game/spellbook';
 import { createCreatureModel } from './creatures';
 import type { BattleEngine } from './BattleEngine';
 import { BATTLEFIELD_COLUMNS, BATTLEFIELD_ROWS, hexKey, hexToWorld } from './hex';
@@ -33,6 +33,10 @@ interface SceneHandlers {
   onHover: (payload: HoverPayload) => void;
 }
 
+interface SceneOptions {
+  createCustomCreatureModel?: (creatureId: string, side: 'attacker' | 'defender') => THREE.Group | undefined;
+}
+
 interface Tween {
   start: number;
   duration: number;
@@ -55,6 +59,7 @@ export class BattleScene {
   private readonly host: HTMLElement;
   private readonly engine: BattleEngine;
   private readonly handlers: SceneHandlers;
+  private readonly options: SceneOptions;
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.OrthographicCamera(-15, 15, 10, -10, 0.1, 120);
   private readonly renderer: THREE.WebGLRenderer;
@@ -74,10 +79,11 @@ export class BattleScene {
   private yaw = 0;
   private target = new THREE.Vector3();
 
-  constructor(host: HTMLElement, engine: BattleEngine, handlers: SceneHandlers) {
+  constructor(host: HTMLElement, engine: BattleEngine, handlers: SceneHandlers, options: SceneOptions = {}) {
     this.host = host;
     this.engine = engine;
     this.handlers = handlers;
+    this.options = options;
     this.scene.background = new THREE.Color(0x101b19);
     this.scene.fog = new THREE.Fog(0x101b19, 35, 70);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -297,7 +303,8 @@ export class BattleScene {
 
   private createStacks(): void {
     for (const stack of this.engine.getState().stacks) {
-      const group = createCreatureModel(stack.creatureId, stack.side);
+      const group = this.options.createCustomCreatureModel?.(stack.creatureId, stack.side) ??
+        createCreatureModel(stack.creatureId, stack.side);
       group.position.copy(worldPosition(stack.position));
       group.userData.stackId = stack.id;
       this.scene.add(group);
@@ -527,9 +534,10 @@ export class BattleScene {
   }
 
   private async animateSpell(event: Extract<BattleEvent, { kind: 'spell' }>): Promise<void> {
-    const spell = getSpell(event.spellId);
+    const spell = getCombatSpell(event.spellId);
     const color = spell.school === 'fire' ? 0xff784e : spell.school === 'water' ? 0x72d7e8 :
       spell.school === 'earth' ? 0xc4b379 : 0xc4a5ef;
+    const effect = typeof spell.effect === 'string' ? spell.effect : spell.effect.kind;
     const rings: THREE.Mesh[] = [];
     for (const targetId of event.targetIds) {
       const stack = this.engine.getStack(targetId);
@@ -539,8 +547,22 @@ export class BattleScene {
       this.scene.add(ring);
       rings.push(ring);
       const amount = event.amounts[targetId] ?? 0;
-      const text = spell.effect === 'damage' ? `−${amount}` : spell.effect === 'heal' ? `+${amount}` : spell.name.toUpperCase();
-      this.floatText(stack.position, text, spell.effect === 'heal' ? '#83e39a' : '#d7b6ff');
+      const damaging = effect === 'damage' || effect === 'chainDamage' || effect === 'massDamage';
+      const healing = effect === 'heal' || effect === 'restoration';
+      const text = damaging ? `−${amount}` : healing ? `+${amount}` : spell.name.toUpperCase();
+      this.floatText(stack.position, text, healing ? '#83e39a' : '#d7b6ff');
+    }
+    const anchor = this.engine.getActiveStack() ?? this.engine.getLivingStacks(event.side)[0];
+    if (anchor) {
+      for (const side of ['attacker', 'defender'] as const) {
+        const amount = event.amounts[`hero:${side}`];
+        if (amount === undefined) continue;
+        const ring = this.createRing(color, 0.65, 0.08);
+        ring.position.copy(worldPosition(anchor.position)).setY(0.25);
+        this.scene.add(ring);
+        rings.push(ring);
+        this.floatText(anchor.position, `${amount >= 0 ? '+' : '−'}${Math.abs(amount)} MANA`, '#83d9ef');
+      }
     }
     await this.tween(420, (progress) => {
       for (const ring of rings) {

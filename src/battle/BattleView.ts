@@ -1,5 +1,8 @@
-import { getCreature, getSpell, HEROES } from '../game/content';
-import type { BattleResult, BattleSetup, SpellDefinition } from '../game/types';
+import type * as THREE from 'three';
+import { getCreature, HEROES } from '../game/content';
+import { getCombatSpell } from '../game/spellbook';
+import type { CombatSpellDefinition } from '../game/spellbook';
+import type { BattleResult, BattleSetup } from '../game/types';
 import { performAiTurn } from './BattleAI';
 import { BattleEngine } from './BattleEngine';
 import { BattleScene } from './BattleScene';
@@ -19,6 +22,10 @@ interface HoverPayload {
   hex: HexCoord | null;
   clientX: number;
   clientY: number;
+}
+
+export interface BattleViewOptions {
+  createCustomCreatureModel?: (creatureId: string, side: BattleSideId) => THREE.Group | undefined;
 }
 
 function escapeHtml(value: string): string {
@@ -50,7 +57,12 @@ export class BattleView {
   private resultDelivered = false;
   private currentReachable: ReachableHex[] = [];
 
-  constructor(container: HTMLElement, setup: BattleSetup, onComplete: (result: BattleResult) => void) {
+  constructor(
+    container: HTMLElement,
+    setup: BattleSetup,
+    onComplete: (result: BattleResult) => void,
+    options: BattleViewOptions = {},
+  ) {
     this.container = container;
     this.onComplete = onComplete;
     this.engine = new BattleEngine(setup);
@@ -100,7 +112,7 @@ export class BattleView {
               <li>Wait acts again in reverse order at the end of the round. Defend ends the activation and grants 25% defense until the stack’s next turn.</li>
             </ul>
             <h3>Hero magic</h3>
-            <p>Each hero may cast once per round during their own army’s turn without consuming the stack’s action. Choose a spell, then a highlighted target. Fireball hits every enemy; Cure heals and can revive a fallen ally on its original, unobstructed hex.</p>
+            <p>Each hero may cast once per round during their own army’s turn without consuming the stack’s action. Choose one of 19 spells, then a highlighted target when required. Mass, caster, and enemy-hero spells resolve immediately. Cure and Fountain of Life can revive a fallen ally on its original, unobstructed hex; Tidal Renewal heals wounded living allies only. Quake Pulse damages both armies.</p>
             <h3>Camera and controls</h3>
             <p>Right-drag to orbit, middle-drag or Shift-drag to pan, and use the wheel to zoom. On touchscreens, drag to orbit and tap to act. Keyboard: S spell, W wait, D defend, A auto combat, R reset camera, H help, Escape cancel. Auto hands both armies to the tactical AI.</p>
             <div class="h3b-dialog-footer"><button class="h3b-primary" data-action="close-help" type="button">Return to battle</button></div>
@@ -118,7 +130,7 @@ export class BattleView {
       onStackClick: (stackId) => this.handleStackClick(stackId),
       onHexClick: (hex) => this.handleHexClick(hex),
       onHover: (payload) => this.handleHover(payload),
-    });
+    }, { createCustomCreatureModel: options.createCustomCreatureModel });
     this.bindInput();
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -244,8 +256,9 @@ export class BattleView {
 
   private selectSpell(spellId: string): void {
     if (!this.canControl()) return;
-    const spell = getSpell(spellId);
-    if (spell.target === 'allEnemies') {
+    const spell = getCombatSpell(spellId);
+    if (spell.target === 'allEnemies' ||
+      typeof spell.effect !== 'string' && spell.target !== 'ally' && spell.target !== 'enemy') {
       void this.perform(() => this.engine.castSpell(spellId, 'attacker'));
       return;
     }
@@ -357,7 +370,7 @@ export class BattleView {
       return;
     }
     const creature = getCreature(active.creatureId);
-    const statuses = Object.keys(active.statuses);
+    const statuses = [...Object.keys(active.statuses), ...Object.keys(active.expandedStatuses ?? {})];
     if (active.defending) statuses.push('defending');
     if (active.waited) statuses.push('waited');
     const traits = creature.abilities.length > 0 ? creature.abilities.join(' · ') : 'no special traits';
@@ -418,7 +431,8 @@ export class BattleView {
       }).join('')}</div>`;
   }
 
-  private describeSpell(spell: SpellDefinition): string {
+  private describeSpell(spell: CombatSpellDefinition): string {
+    if (typeof spell.effect !== 'string') return spell.description;
     const amount = this.engine.getSpellAmount(spell.id, 'attacker');
     if (spell.effect === 'damage') return `${amount} ${spell.target === 'allEnemies' ? 'damage to every enemy' : 'damage to one enemy'}; resistance halves it.`;
     if (spell.effect === 'heal') return `Restore up to ${amount} health and revive fallen creatures.`;
@@ -431,7 +445,7 @@ export class BattleView {
   private defaultHint(active: BattleStackState | null): string {
     if (this.engine.getResult()) return 'Battle complete. Review the survivors and return to the adventure.';
     if (this.busy) return this.auto ? 'Tactical AI is resolving the battle…' : 'Resolving the activation…';
-    if (this.selectedSpell) return `${getSpell(this.selectedSpell).name}: choose a purple-ringed target · Escape cancels`;
+    if (this.selectedSpell) return `${getCombatSpell(this.selectedSpell).name}: choose a purple-ringed target · Escape cancels`;
     if (this.auto) return 'Auto combat is on. Disable it at any attacker turn to take control.';
     if (active?.side === 'defender') return 'The enemy commander is choosing a tactical action…';
     return 'Click a green hex to move · Click a red-ringed enemy to attack · H opens the guide';
@@ -451,7 +465,7 @@ export class BattleView {
       content = `<strong>${escapeHtml(creature.name)} ×${stack.count}</strong><div>${sideName(stack.side)} · ${this.engine.getStackHealth(stack)}/${this.engine.getStackMaxHealth(stack)} total HP</div>`;
       if (this.selectedSpell) {
         const valid = this.engine.getSpellTargets(this.selectedSpell, 'attacker').includes(stack.id);
-        content += `<div>${valid ? `Cast ${escapeHtml(getSpell(this.selectedSpell).name)}` : 'Invalid target for this spell'}</div>`;
+        content += `<div>${valid ? `Cast ${escapeHtml(getCombatSpell(this.selectedSpell).name)}` : 'Invalid target for this spell'}</div>`;
       } else if (this.canControl() && stack.side === 'defender' && stack.count > 0) {
         const preview = this.engine.getAttackPreview(stack.id);
         if (preview) {

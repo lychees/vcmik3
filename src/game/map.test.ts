@@ -62,8 +62,10 @@ describe('pathfinding', () => {
     for (const seed of ['alpha', 'beta', 'gamma']) {
       const map = createAdventureMap(seed);
       const start = { x: 3, y: Math.floor(map.height / 2) };
+      const reachable = new Set(getReachableTiles(map, start, Number.POSITIVE_INFINITY)
+        .map((tile) => tile.tileIndex));
       for (const object of Object.values(map.objects)) {
-        expect(findPath(map, start, object.position), `${seed}:${object.id}`).not.toBeNull();
+        expect(reachable.has(toTileIndex(map, object.position)), `${seed}:${object.id}`).toBe(true);
       }
     }
   });

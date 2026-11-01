@@ -6,6 +6,7 @@ export type IconName =
   | 'army' | 'book' | 'castle' | 'check' | 'close' | 'coins' | 'compass'
   | 'construction' | 'crystal' | 'endTurn' | 'gems' | 'gold' | 'help'
   | 'hero' | 'info' | 'left' | 'lock' | 'mana' | 'map' | 'mercury'
+  | 'mithril' | 'obsidian' | 'essence'
   | 'movement' | 'ore' | 'recruit' | 'right' | 'save' | 'shield'
   | 'skull' | 'spark' | 'star' | 'sulfur' | 'sword' | 'wood';
 
@@ -30,6 +31,9 @@ const paths: Record<IconName, string> = {
   mana: '<path d="M12 2C9 7 5 11 5 15a7 7 0 0 0 14 0c0-4-4-8-7-13Z"/><path d="M9 16c.4 1.5 1.4 2 3 2"/>',
   map: '<path d="m3 5 6-3 6 3 6-3v17l-6 3-6-3-6 3V5Zm6-3v17m6-14v17"/>',
   mercury: '<path d="M12 2C9 7 5 11 5 15a7 7 0 0 0 14 0c0-4-4-8-7-13Z"/><path d="M8 15c1 2 5 2 8-1"/>',
+  mithril: '<path d="m12 2 8 5-3 12-5 3-5-3L4 7l8-5Zm0 0v20M4 7l8 5 8-5M7 19l5-7 5 7"/>',
+  obsidian: '<path d="m12 2 7 4 2 9-9 7-9-7 2-9 7-4Zm0 0L8 13l4 9 4-9-4-11ZM3 15h6m6 0h6"/>',
+  essence: '<path d="m12 2 2 6 6 4-6 2-2 8-2-8-6-2 6-4 2-6Zm0 8v4m-2-2h4"/>',
   movement: '<path d="M13 3c2 5 2 8 0 11l-3 4 3 3H6c-2 0-3-2-2-4l3-5c1-2 1-4 1-7l5-2Z"/><path d="m15 8 4 2m-5 2 5 2"/>',
   ore: '<path d="m4 18-2-7 5-7 9-2 6 7-3 10-9 3-6-4Z"/><path d="m7 4 4 7 5-9M2 11h9l8 8M11 11l-1 11"/>',
   recruit: '<circle cx="9" cy="8" r="4"/><path d="M2 21c.5-5 2.8-8 7-8 2.5 0 4.2 1.2 5.3 3M18 12v8m-4-4h8"/>',
@@ -65,6 +69,9 @@ const RESOURCE_ICON_NAMES = {
   gems: 'gems',
   mercury: 'mercury',
   sulfur: 'sulfur',
+  mithril: 'mithril',
+  obsidian: 'obsidian',
+  essence: 'essence',
 } as const satisfies Record<string, IconName>;
 
 function svgId(value: string): string {

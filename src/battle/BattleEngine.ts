@@ -1,13 +1,17 @@
 import { cloneBattleSetup } from '../game/combat';
-import { getCreature, getSpell, SPELLS } from '../game/content';
+import { getCreature, getSpell } from '../game/content';
 import { SeededRandom } from '../game/random';
+import { createDefaultSpellbook, getCombatSpell } from '../game/spellbook';
+import type { CombatSpellDefinition } from '../game/spellbook';
+import { isExpandedSpellId } from '../game/spells';
+import type { ExpandedSpellId, ExpandedStackModifiers } from '../game/spells';
 import type {
   ArmyStack,
   BattleResult,
   BattleSetup,
   BattleSide,
-  SpellDefinition,
 } from '../game/types';
+import { createExpandedSpellPlan, getExpandedSpellTargets } from './magic';
 import {
   BATTLEFIELD_COLUMNS,
   BATTLEFIELD_ROWS,
@@ -129,25 +133,36 @@ export class BattleEngine {
     return this.state.heroes[side];
   }
 
-  getSpellbook(side: BattleSideId): SpellDefinition[] {
+  getSpellbook(side: BattleSideId): CombatSpellDefinition[] {
     const hero = this.getHero(side);
-    return hero ? hero.spells.map((spellId) => getSpell(spellId)) : [];
+    return hero ? hero.spells.map((spellId) => getCombatSpell(spellId)) : [];
+  }
+
+  private getExpandedModifier(stack: BattleStackState, key: keyof ExpandedStackModifiers): number {
+    return Object.values(stack.expandedStatuses ?? {}).reduce((total, status) =>
+      total + (status?.modifiers[key] ?? 0), 0);
+  }
+
+  private getDamageReduction(stack: BattleStackState): number {
+    return Math.min(0.85, Math.max(0, this.getExpandedModifier(stack, 'damageReduction')));
   }
 
   getStackSpeed(stack: BattleStackState): number {
-    let speed = getCreature(stack.creatureId).speed;
+    let speed = getCreature(stack.creatureId).speed + this.getExpandedModifier(stack, 'speed');
     if (stack.statuses.haste) speed += getSpell('haste').power;
     if (stack.statuses.slow) speed -= getSpell('slow').power;
     return Math.max(1, speed);
   }
 
   getStackAttack(stack: BattleStackState): number {
-    return getCreature(stack.creatureId).attack + this.setup[stack.side].primarySkills.attack;
+    return getCreature(stack.creatureId).attack + this.setup[stack.side].primarySkills.attack +
+      this.getExpandedModifier(stack, 'attack');
   }
 
   getStackDefense(stack: BattleStackState): number {
     const base = getCreature(stack.creatureId).defense +
-      this.setup[stack.side].primarySkills.defense + (stack.statuses.shield ? getSpell('stoneSkin').power : 0);
+      this.setup[stack.side].primarySkills.defense + (stack.statuses.shield ? getSpell('stoneSkin').power : 0) +
+      this.getExpandedModifier(stack, 'defense');
     return base + (stack.defending ? Math.max(1, Math.floor(base * 0.25)) : 0);
   }
 
@@ -272,9 +287,16 @@ export class BattleEngine {
   }
 
   getSpellTargets(spellId: string, side: BattleSideId): string[] {
-    const spell = getSpell(spellId);
+    const spell = getCombatSpell(spellId);
     const hero = this.getHero(side);
     if (!hero || !hero.spells.includes(spellId) || this.state.result) return [];
+    if (isExpandedSpellId(spellId)) {
+      const revivableStackIds = this.getLivingStacks(side).length > 0
+        ? this.state.stacks.filter((stack) => stack.side === side && stack.count <= 0 &&
+          stack.initialCount > 0 && this.isLandingOpen(stack.position, stack.id)).map((stack) => stack.id)
+        : [];
+      return getExpandedSpellTargets(spellId, { casterSide: side, stacks: this.state.stacks, revivableStackIds });
+    }
     if (spell.target === 'allEnemies') return [];
     if (spell.target === 'self') {
       const active = this.getActiveStack();
@@ -299,8 +321,14 @@ export class BattleEngine {
   }
 
   getSpellAmount(spellId: string, side: BattleSideId): number {
-    const spell = getSpell(spellId);
-    return spell.power + this.setup[side].primarySkills.spellPower * 10;
+    const spell = getCombatSpell(spellId);
+    const spellPower = this.setup[side].primarySkills.spellPower;
+    if (typeof spell.effect === 'string') return spell.power + spellPower * 10;
+    if (spell.effect.kind === 'chainDamage' || spell.effect.kind === 'massDamage') {
+      return Math.max(0, Math.floor(spell.effect.baseDamage + spell.effect.powerDamage * spellPower));
+    }
+    if (spell.effect.kind === 'status') return 0;
+    return Math.max(0, Math.floor(spell.effect.baseAmount + spell.effect.powerAmount * spellPower));
   }
 
   move(destination: HexCoord): BattleActionResult<BattleEvent[]> {
@@ -386,6 +414,7 @@ export class BattleEngine {
   castSpell(spellId: string, side: BattleSideId, targetId?: string): BattleActionResult<BattleEvent[]> {
     return this.attempt(() => {
       const spell = this.validateSpell(spellId, side, targetId);
+      if (typeof spell.effect !== 'string') return this.castExpandedSpell(spellId, side, targetId);
       const hero = this.getHero(side);
       if (!hero) throw new Error('This side has no spellcaster');
       const targets = spell.target === 'allEnemies'
@@ -402,8 +431,7 @@ export class BattleEngine {
 
       for (const target of validTargets) {
         if (spell.effect === 'damage') {
-          const resistance = getCreature(target.creatureId).abilities.includes('spellResistance');
-          const amount = Math.max(1, Math.floor(this.getSpellAmount(spellId, side) * (resistance ? 0.5 : 1)));
+          const amount = this.getSpellDamage(target, this.getSpellAmount(spellId, side));
           const before = totalHealth(target);
           const result = this.applyDamage(target, amount);
           amounts[target.id] = Math.min(before, amount);
@@ -435,6 +463,69 @@ export class BattleEngine {
     });
   }
 
+  private getSpellDamage(stack: BattleStackState, rawAmount: number): number {
+    const resistance = getCreature(stack.creatureId).abilities.includes('spellResistance') ? 0.5 : 1;
+    return Math.max(1, Math.floor(rawAmount * resistance * (1 - this.getDamageReduction(stack))));
+  }
+
+  private castExpandedSpell(spellId: Parameters<typeof createExpandedSpellPlan>[0], side: BattleSideId, targetId?: string): BattleEvent[] {
+    const plan = createExpandedSpellPlan(spellId, {
+      casterSide: side,
+      stacks: this.state.stacks,
+      heroes: this.state.heroes,
+      targetId,
+      revivableStackIds: this.state.stacks.filter((stack) => stack.side === side && stack.count <= 0 &&
+        stack.initialCount > 0 && this.isLandingOpen(stack.position, stack.id)).map((stack) => stack.id),
+    });
+    const caster = this.getHero(side);
+    if (!caster) throw new Error('This side has no spellcaster');
+    const spell = getCombatSpell(spellId);
+    caster.mana -= plan.manaCost;
+    caster.castThisRound = plan.consumeCast;
+    const amounts: Record<string, number> = {};
+    let defeated = 0;
+    let revived = 0;
+    for (const operation of plan.operations) {
+      if (operation.kind === 'manaBurn' || operation.kind === 'manaDrain' || operation.kind === 'manaRestore') {
+        const hero = this.getHero(operation.side);
+        if (!hero) throw new Error('The mana target no longer exists');
+        if (operation.kind === 'manaRestore') hero.mana = Math.min(hero.maxMana, hero.mana + operation.amount);
+        else hero.mana = Math.max(0, hero.mana - operation.amount);
+        amounts[`hero:${operation.side}`] = operation.kind === 'manaRestore' ? operation.amount : -operation.amount;
+        continue;
+      }
+      if (!('targetId' in operation)) continue;
+      const target = this.getStack(operation.targetId);
+      if (!target) throw new Error('The spell target is no longer valid');
+      if (operation.kind === 'damage') {
+        const amount = this.getSpellDamage(target, operation.amount);
+        const before = totalHealth(target);
+        defeated += this.applyDamage(target, amount);
+        amounts[target.id] = Math.min(before, amount);
+      } else if (operation.kind === 'heal') {
+        const result = this.applyHealing(target, operation.amount);
+        amounts[target.id] = result.healed;
+        revived += result.revived;
+      } else if (operation.kind === 'status') {
+        target.expandedStatuses = {
+          ...target.expandedStatuses,
+          [operation.statusId]: { duration: operation.duration, modifiers: { ...operation.modifiers } },
+        };
+        amounts[target.id] = operation.duration;
+      }
+    }
+    const events: BattleEvent[] = [{ kind: 'spell', side, spellId, targetIds: [...plan.targetIds], amounts }];
+    const targets = plan.targetIds.map((id) => this.getStack(id)).filter((stack): stack is BattleStackState => Boolean(stack));
+    let detail = targets.map((target) => this.stackName(target)).join(', ');
+    if (!detail) detail = side === 'attacker' ? 'the defending hero' : 'the attacking hero';
+    if (defeated > 0) detail += ` (${defeated} creature${defeated === 1 ? '' : 's'} slain)`;
+    if (revived > 0) detail += ` (${revived} creature${revived === 1 ? '' : 's'} revived)`;
+    this.log('magic', `${side === 'attacker' ? 'Attacking' : 'Defending'} hero casts ${spell.name} on ${detail}.`);
+    this.checkOutcome(events);
+    if (!this.state.result && this.getActiveStack()?.count === 0) this.finishActivation(events);
+    return events;
+  }
+
   private createStacks(
     side: BattleSideId,
     battleSide: BattleSide,
@@ -460,6 +551,7 @@ export class BattleEngine {
         waited: false,
         retaliationsUsed: 0,
         statuses: {},
+        expandedStatuses: {},
       });
     });
     return stacks;
@@ -467,13 +559,13 @@ export class BattleEngine {
 
   private createHero(side: BattleSide): BattleHeroState | undefined {
     if (!side.heroId) return undefined;
-    const maxMana = Math.max(0, side.primarySkills.knowledge * 10);
+    const maxMana = Math.max(0, side.maxMana ?? side.primarySkills.knowledge * 10);
     return {
       heroId: side.heroId,
       primarySkills: { ...side.primarySkills },
-      mana: maxMana,
+      mana: Math.max(0, Math.min(maxMana, side.mana ?? maxMana)),
       maxMana,
-      spells: Object.values(SPELLS).sort((a, b) => a.level - b.level || a.id.localeCompare(b.id)).map((spell) => spell.id),
+      spells: [...(side.spells ?? createDefaultSpellbook())],
       castThisRound: false,
     };
   }
@@ -543,16 +635,27 @@ export class BattleEngine {
     return active;
   }
 
-  private validateSpell(spellId: string, side: BattleSideId, targetId?: string): SpellDefinition {
+  private validateSpell(spellId: string, side: BattleSideId, targetId?: string): CombatSpellDefinition {
     if (this.state.result) throw new Error('The battle has already ended');
     const active = this.requireActive();
     if (active.side !== side) throw new Error('Heroes can only cast during their own army’s turn');
     const hero = this.getHero(side);
     if (!hero) throw new Error('This side has no hero');
     if (hero.castThisRound) throw new Error('This hero has already cast a spell this round');
-    const spell = getSpell(spellId);
+    const spell = getCombatSpell(spellId);
     if (!hero.spells.includes(spellId)) throw new Error('This hero does not know that spell');
     if (hero.mana < spell.manaCost) throw new Error('Not enough mana');
+    if (typeof spell.effect !== 'string') {
+      createExpandedSpellPlan(spellId, {
+        casterSide: side,
+        stacks: this.state.stacks,
+        heroes: this.state.heroes,
+        targetId,
+        revivableStackIds: this.state.stacks.filter((stack) => stack.side === side && stack.count <= 0 &&
+          stack.initialCount > 0 && this.isLandingOpen(stack.position, stack.id)).map((stack) => stack.id),
+      });
+      return spell;
+    }
     const validTargets = this.getSpellTargets(spellId, side);
     if (spell.target === 'allEnemies') {
       if (this.getLivingStacks(oppositeSide(side)).length === 0) throw new Error('There are no enemy targets');
@@ -581,8 +684,9 @@ export class BattleEngine {
     const modifier = Math.min(3, Math.max(0.3, 1 + (attack - defense) * 0.05));
     const shotModifier = (rangePenalty ? 0.5 : 1) * (obstaclePenalty ? 0.5 : 1) * (wallPenalty ? 0.5 : 1);
     const kindModifier = kind === 'melee' && creature.abilities.includes('ranged') ? 0.5 : 1;
-    const minimum = attacker.count * (creature.damage[0] + bless) * modifier * shotModifier * kindModifier;
-    const maximum = attacker.count * (creature.damage[1] + bless) * modifier * shotModifier * kindModifier;
+    const mitigation = 1 - this.getDamageReduction(target);
+    const minimum = attacker.count * (creature.damage[0] + bless) * modifier * shotModifier * kindModifier * mitigation;
+    const maximum = attacker.count * (creature.damage[1] + bless) * modifier * shotModifier * kindModifier * mitigation;
     return { min: Math.max(1, Math.floor(minimum)), max: Math.max(1, Math.floor(maximum)) };
   }
 
@@ -648,6 +752,7 @@ export class BattleEngine {
     if (stack.count === 0) {
       stack.defending = false;
       stack.statuses = {};
+      stack.expandedStatuses = {};
     }
     return oldCount - stack.count;
   }
@@ -690,6 +795,10 @@ export class BattleEngine {
         ? { experience: 0, resources: {} }
         : { experience: this.setup.rewards.experience, resources: { ...this.setup.rewards.resources } },
       rounds: this.state.round,
+      ...(this.setup.attacker.maxMana !== undefined && this.getHero('attacker')
+        ? { attackerMana: this.getHero('attacker')!.mana } : {}),
+      ...(this.setup.defender.maxMana !== undefined && this.getHero('defender')
+        ? { defenderMana: this.getHero('defender')!.mana } : {}),
     };
     this.state.result = result;
     this.state.activeStackId = null;
@@ -749,6 +858,12 @@ export class BattleEngine {
           if (remaining === undefined) continue;
           if (remaining <= 1) delete stack.statuses[status];
           else stack.statuses[status] = remaining - 1;
+        }
+        for (const status of Object.keys(stack.expandedStatuses ?? {}) as ExpandedSpellId[]) {
+          const remaining = stack.expandedStatuses?.[status];
+          if (!remaining) continue;
+          if (remaining.duration <= 1) delete stack.expandedStatuses?.[status];
+          else remaining.duration -= 1;
         }
       }
     }

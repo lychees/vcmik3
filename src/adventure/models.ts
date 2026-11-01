@@ -1,16 +1,30 @@
 import * as THREE from 'three';
 import { createCreatureModel, getCreatureVisualFaction } from '../battle/creatures';
 import { HOTA_CREATURE_FACTIONS } from '../battle/hotaCreatures';
-import { RESOURCE_TYPES } from '../game/content';
+import { getArtifact } from '../game/artifacts';
+import { EXTENDED_RESOURCE_TYPES as RESOURCE_TYPES, NEW_RESOURCES } from '../game/resources';
 import {
   addHotaArchitecture,
   addHotaDwellingDetails,
   HOTA_FACTION_PALETTES,
 } from './hotaArchitecture';
+import { hasVisitedLandmark, isLandmarkUsed } from '../game/landmarks';
+import { createArcaneLibraryModel } from './landmarks/arcaneLibrary';
+import { createWarriorsArenaModel } from './landmarks/warriorsArena';
+import { createHeroesShrineModel } from './landmarks/heroesShrine';
+import { createHuntersLodgeModel } from './landmarks/huntersLodge';
+import { createWaterwheelModel } from './landmarks/waterwheel';
+import { createElementalForgeModel } from './landmarks/elementalForge';
+import { createAncientObservatoryModel } from './landmarks/ancientObservatory';
+import { createHealersSanctuaryModel } from './landmarks/healersSanctuary';
+import { createWayfarerPortalModel } from './landmarks/wayfarerPortal';
+import { createMerchantsTentModel } from './landmarks/merchantsTent';
 import type {
   DwellingObject,
   GameState,
   HeroState,
+  LandmarkObject,
+  LandmarkType,
   MapObject,
   MineObject,
   MonsterObject,
@@ -32,6 +46,9 @@ const RESOURCE_COLORS: Record<ResourceType, number> = {
   gems: 0xc17be8,
   mercury: 0xb9d6db,
   sulfur: 0xe4d65b,
+  mithril: NEW_RESOURCES.mithril.color,
+  obsidian: NEW_RESOURCES.obsidian.color,
+  essence: NEW_RESOURCES.essence.color,
 };
 
 function material(color: THREE.ColorRepresentation, roughness = 0.82): THREE.MeshStandardMaterial {
@@ -153,6 +170,21 @@ function createChest(): THREE.Group {
   box(chest, 0.05, 0.35, 0.335, metal, 0, 0.2, 0);
   box(chest, 0.08, 0.09, 0.025, metal, 0, 0.19, 0.172);
   return chest;
+}
+
+function createArtifactModel(artifactId: string): AdventureModel {
+  const artifact = getArtifact(artifactId);
+  const colors = { common: 0xb7c4b0, rare: 0x73b9e6, epic: 0xb58ae6, legendary: 0xf0c75e } as const;
+  const color = artifact ? colors[artifact.rarity] : colors.common;
+  const model: AdventureModel = { group: new THREE.Group(), flags: [] };
+  model.group.add(createChest());
+  const focus = addMesh(model.group, new THREE.OctahedronGeometry(0.18, 0), material(color, 0.28), 0, 0.72, 0);
+  focus.scale.y = 1.35;
+  focus.userData.artifactId = artifactId;
+  model.group.add(createGroundMarker(color, 0.48));
+  model.group.userData.kind = 'artifact';
+  model.group.userData.artifactId = artifactId;
+  return model;
 }
 
 function createResourceModel(object: ResourceObject): AdventureModel {
@@ -444,8 +476,15 @@ function createMonsterModel(object: MonsterObject): AdventureModel {
   const model: AdventureModel = { group: new THREE.Group(), flags: [] };
   const creatureId = object.army[0]?.creatureId ?? 'militia';
   const faction = getCreatureVisualFaction(creatureId);
-  const hasExpansionModel = Boolean(EXPANSION_FACTIONS[creatureId] || HOTA_CREATURE_FACTIONS[creatureId]);
-  if (hasExpansionModel) {
+  const hasExpansionModel = Boolean(EXPANSION_FACTIONS[creatureId] || HOTA_CREATURE_FACTIONS[creatureId] || faction === 'Neutral');
+  if (faction === 'Neutral') {
+    object.army.slice(0, 2).forEach((stack, index) => {
+      const creature = createCreatureModel(stack.creatureId, 'attacker', { factionRing: false });
+      creature.scale.setScalar(creature.userData.visualHeight > 1.8 ? 0.36 : 0.46);
+      creature.position.set(index === 0 ? -0.25 : 0.25, 0, -0.12);
+      model.group.add(creature);
+    });
+  } else if (hasExpansionModel) {
     const creature = createCreatureModel(creatureId, 'attacker', { factionRing: false });
     const large = creatureId === 'pitFiend' || (HOTA_CREATURE_FACTIONS[creatureId] && creature.userData.visualHeight > 1.8);
     creature.scale.setScalar(large ? 0.45 : 0.58);
@@ -455,18 +494,66 @@ function createMonsterModel(object: MonsterObject): AdventureModel {
   else if (creatureId === 'sprite') createSprite(model.group);
   else createHumanoid(model.group, creatureId === 'archer' ? 0x56754b : 0x884f45);
   const chest = createChest();
-  chest.scale.setScalar(0.45);
-  chest.position.set(0.37, 0, 0.24);
+  chest.scale.setScalar(faction === 'Neutral' ? 0.35 : 0.45);
+  chest.position.set(faction === 'Neutral' ? 0 : 0.37, 0, faction === 'Neutral' ? 0.38 : 0.24);
   model.group.add(chest);
   model.group.userData.creatureId = creatureId;
+  model.group.userData.creatureIds = object.army.map((stack) => stack.creatureId);
   model.group.userData.faction = faction ?? 'Haven';
   model.group.add(createGroundMarker(0xd96556, 0.47));
   return model;
 }
 
+const LANDMARK_MODEL_FACTORIES: Record<LandmarkType, () => THREE.Group> = {
+  arcaneLibrary: createArcaneLibraryModel,
+  warriorsArena: createWarriorsArenaModel,
+  heroesShrine: createHeroesShrineModel,
+  huntersLodge: createHuntersLodgeModel,
+  waterwheel: createWaterwheelModel,
+  elementalForge: createElementalForgeModel,
+  ancientObservatory: createAncientObservatoryModel,
+  healersSanctuary: createHealersSanctuaryModel,
+  wayfarerPortal: createWayfarerPortalModel,
+  merchantsTent: createMerchantsTentModel,
+};
+
+function createLandmarkModel(object: LandmarkObject, state: Readonly<GameState>): AdventureModel {
+  const group = LANDMARK_MODEL_FACTORIES[object.landmarkId]();
+  const bounds = new THREE.Box3().setFromObject(group);
+  const size = bounds.getSize(new THREE.Vector3());
+  const scale = Math.min(1, 1.04 / Math.max(size.x, size.z, 0.01));
+  group.scale.setScalar(scale);
+  const heroId = state.selectedHeroId ?? '';
+  const visited = hasVisitedLandmark(object, heroId);
+  const depleted = isLandmarkUsed(object, heroId, state.calendar.day);
+  if (depleted) {
+    const surfaces = new Set<THREE.Material>();
+    group.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const surface of materials) surfaces.add(surface);
+    });
+    for (const surface of surfaces) {
+      if (!('color' in surface) || !(surface.color instanceof THREE.Color)) continue;
+      surface.color.multiplyScalar(0.58);
+      surface.userData.fogBaseColor = surface.color.getHex();
+    }
+  }
+  group.userData.landmarkId = object.landmarkId;
+  group.userData.kind = 'landmark';
+  group.userData.faction = 'Neutral';
+  group.userData.visited = visited;
+  group.userData.depleted = depleted;
+  group.userData.visualHeight = size.y * scale;
+  group.userData.labelHeight = bounds.max.y * scale + 0.45;
+  group.add(createGroundMarker(depleted ? 0x777b76 : object.landmarkId === 'wayfarerPortal' ? 0x72d9e8 : 0xe2c675, 0.5));
+  return { group, flags: [] };
+}
+
 export function createObjectModel(object: MapObject, state: Readonly<GameState>): AdventureModel {
   switch (object.kind) {
     case 'resource': return createResourceModel(object);
+    case 'artifact': return createArtifactModel(object.artifactId);
     case 'mine': {
       const color = object.ownerId ? state.players[object.ownerId]?.color ?? '#aaaaaa' : '#a7a693';
       return createMineModel(object, color);
@@ -474,6 +561,7 @@ export function createObjectModel(object: MapObject, state: Readonly<GameState>)
     case 'town': return createTownModel(object, state);
     case 'dwelling': return createDwellingModel(object);
     case 'monster': return createMonsterModel(object);
+    case 'landmark': return createLandmarkModel(object, state);
   }
 }
 

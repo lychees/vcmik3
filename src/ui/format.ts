@@ -1,11 +1,11 @@
 import { MAX_ARMY_STACKS } from '../game/army';
 import {
   BUILDINGS,
-  RESOURCE_TYPES,
   canAfford,
   getBuilding,
   getCreature,
 } from '../game/content';
+import { EXTENDED_RESOURCE_TYPES as RESOURCE_TYPES } from '../game/resources';
 import { getObjectAt } from '../game/map';
 import { experienceForLevel } from '../game/progression';
 import type {
@@ -30,6 +30,9 @@ export const RESOURCE_META: Record<ResourceType, { name: string; shortName: stri
   gems: { name: 'Gems', shortName: 'Gems' },
   mercury: { name: 'Mercury', shortName: 'Mercury' },
   sulfur: { name: 'Sulfur', shortName: 'Sulfur' },
+  mithril: { name: 'Mithril', shortName: 'Mithril' },
+  obsidian: { name: 'Obsidian', shortName: 'Obsidian' },
+  essence: { name: 'Essence', shortName: 'Essence' },
 };
 
 export const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
@@ -253,6 +256,9 @@ export function getCurrentObjective(state: Readonly<GameState>): Objective {
   }
   if (object?.kind === 'resource') {
     return { title: object.name, detail: 'Interact to collect this treasure.', tone: 'opportunity' };
+  }
+  if (object?.kind === 'artifact') {
+    return { title: object.name, detail: 'Interact to collect this artifact, then equip it from the hero panel.', tone: 'opportunity' };
   }
   if (object?.kind === 'mine') {
     return { title: object.name, detail: 'Interact to claim daily resource income for your realm.', tone: 'opportunity' };

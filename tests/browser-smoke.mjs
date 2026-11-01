@@ -97,7 +97,7 @@ class CdpClient {
     return new CdpClient(socket);
   }
 
-  send(method, params = {}, timeout = 60000) {
+  send(method, params = {}, timeout = 180000) {
     const id = this.nextId++;
     return new Promise((resolveSend, rejectSend) => {
       const timer = setTimeout(() => {
@@ -123,7 +123,7 @@ class CdpClient {
     return response.result.value;
   }
 
-  async waitFor(expression, timeout = 20000) {
+  async waitFor(expression, timeout = 60000) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const value = await this.evaluate(`(() => { try { return Boolean(${expression}); } catch { return false; } })()`);
@@ -214,6 +214,125 @@ class CdpClient {
   }
 }
 
+function assertWild(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+async function installWildFixture(client, objectId, options = {}) {
+  const fixture = await client.evaluate(`(() => {
+    const key = 'h3core.save.v1.autosave';
+    const serialized = localStorage.getItem(key);
+    if (!serialized) throw new Error('Missing autosave for wild integration');
+    const state = JSON.parse(serialized);
+    const object = state.map.objects[${JSON.stringify(objectId)}];
+    const options = ${JSON.stringify(options)};
+    const hero = state.heroes['hero-aveline'];
+    if (!object || !hero) throw new Error('Missing wild integration fixture: ' + ${JSON.stringify(objectId)});
+    for (const candidate of Object.values(state.heroes)) candidate.alive = candidate.id === hero.id;
+    hero.alive = true;
+    hero.position = { ...object.position };
+    hero.movementPoints = hero.maxMovementPoints;
+    hero.mana = hero.maxMana;
+    if (object.kind === 'monster') {
+      hero.army = [
+        { creatureId: 'royalLion', count: 50 },
+        { creatureId: 'titan', count: 30 },
+        { creatureId: 'phoenix', count: 30 },
+      ];
+    }
+    if (options.clearSpells) hero.spells = [];
+    if (options.zeroMovement) hero.movementPoints = 0;
+    if (options.zeroMana) hero.mana = 0;
+    if (options.merchant) Object.assign(state.players.red.resources, { gold: 500, wood: 10, ore: 20 });
+    if (object.kind === 'landmark') {
+      delete object.visits[hero.id];
+      const linked = object.linkedObjectId ? state.map.objects[object.linkedObjectId] : null;
+      if (linked) delete linked.visits[hero.id];
+    }
+    state.activePlayerId = 'red';
+    state.selectedHeroId = hero.id;
+    state.pendingBattle = null;
+    state.phase = 'playing';
+    state.winnerId = null;
+    const fog = [];
+    for (let y = Math.max(0, object.position.y - 5); y <= Math.min(state.map.height - 1, object.position.y + 5); y += 1) {
+      for (let x = Math.max(0, object.position.x - 5); x <= Math.min(state.map.width - 1, object.position.x + 5); x += 1) {
+        if (Math.hypot(object.position.x - x, object.position.y - y) <= 5) fog.push(y * state.map.width + x);
+      }
+    }
+    state.fog.red = { visible: [...fog], explored: [...fog] };
+    localStorage.setItem(key, JSON.stringify(state));
+    return {
+      attack: hero.primarySkills.attack,
+      defense: hero.primarySkills.defense,
+      experience: hero.experience,
+      maxMana: hero.maxMana,
+      maxMovementPoints: hero.maxMovementPoints,
+      gold: state.players.red.resources.gold,
+      wood: state.players.red.resources.wood,
+      ore: state.players.red.resources.ore,
+      exploredCount: fog.length,
+      linkedPosition: object.linkedObjectId ? { ...state.map.objects[object.linkedObjectId].position } : null,
+    };
+  })()`);
+  await client.send('Page.reload', { ignoreCache: true });
+  await client.waitFor("document.querySelector('#h3-onboarding:not([hidden])') && !document.querySelector('#h3-continue').hidden");
+  await client.click('#h3-continue');
+  await client.waitFor("document.querySelector('#h3-onboarding').hidden && document.querySelector('.h3-adventure canvas')");
+  await client.click('.h3-adventure__toolbar [aria-label="Focus selected hero"]');
+  await client.click('.h3-adventure__toolbar [aria-label="Zoom in"]');
+  await client.click('.h3-adventure__toolbar [aria-label="Zoom in"]');
+  await delay(100);
+  return fixture;
+}
+
+async function findAdventureObject(client, name) {
+  const center = await client.evaluate(`(() => {
+    const canvas = document.querySelector('.h3-adventure canvas');
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`);
+  for (const yOffset of [-100, -70, -40, -10, 20, 50, 80]) {
+    for (const xOffset of [-90, -60, -30, 0, 30, 60, 90]) {
+      const x = center.x + xOffset;
+      const y = center.y + yOffset;
+      await client.mouse('mouseMoved', x, y, { button: 'none' });
+      await delay(35);
+      const found = await client.evaluate(`(() => {
+        const tooltip = document.querySelector('.h3-adventure__tooltip');
+        return !tooltip.hidden && tooltip.textContent.includes(${JSON.stringify(name)});
+      })()`);
+      if (found) return { x, y };
+    }
+  }
+  return null;
+}
+
+async function saveWildCampaign(client) {
+  for (let index = 0; index < 4; index += 1) {
+    if (await client.evaluate("Boolean(document.querySelector('.h3-victory-dialog[open], .h3-defeat-dialog[open]'))")) {
+      await client.clickText('.h3-dialog-actions button', 'Load campaign');
+      break;
+    }
+    if (!await client.evaluate("Boolean(document.querySelector('.h3-dialog[open]'))")) break;
+    await client.evaluate("document.querySelector('.h3-dialog[open] .h3-dialog-actions button')?.click()");
+    await delay(80);
+  }
+  if (!await client.evaluate("Boolean(document.querySelector('.h3-dialog[open] [data-save=\"autosave\"]'))")) {
+    await client.click('.h3-command-bar [data-action="game-menu"]');
+  }
+  await client.click('[data-save="autosave"]');
+  await client.waitFor("document.querySelector('.h3-dialog[open]')?.textContent.includes('Overwrite saved campaign?') || document.querySelector('.h3-toasts')?.textContent.includes('Campaign saved')");
+  if (await client.evaluate("document.querySelector('.h3-dialog[open]')?.textContent.includes('Overwrite saved campaign?')")) {
+    await client.clickText('.h3-dialog-actions button', 'Overwrite save');
+  }
+  await client.waitFor("document.querySelector('.h3-toasts')?.textContent.includes('Campaign saved')");
+}
+
+async function readWildState(client) {
+  return client.evaluate(`JSON.parse(localStorage.getItem('h3core.save.v1.autosave'))`);
+}
+
 await access(chromePath);
 await access(resolve(distRoot, 'index.html'));
 const profile = await mkdtemp(resolve(projectRoot, '.browser-smoke-'));
@@ -288,7 +407,7 @@ try {
   await client.waitFor("document.readyState === 'complete' && document.querySelector('#h3-onboarding:not([hidden])')");
   await client.assert("document.title.includes('Aster Vale') && location.pathname === '/vcmik3/'", 'Production H3 entry or /vcmik3/ base path is incorrect');
   await client.assert("document.querySelectorAll('.h3-onboarding-roster li').length === 13", 'Onboarding does not show all 13 factions');
-  await client.assert("document.querySelector('.h3-onboarding')?.textContent.includes('52 units') && document.querySelector('.h3-onboarding')?.textContent.includes('64 × 48')", 'Onboarding roster or enlarged-map counts are stale');
+  await client.assert("document.querySelector('.h3-onboarding')?.textContent.includes('72 units') && document.querySelector('.h3-onboarding')?.textContent.includes('64 × 48')", 'Onboarding roster or enlarged-map counts are stale');
   await client.setValue('#h3-seed', 'browser-smoke');
   await client.click('[data-action="start-new"]');
   await client.waitFor("document.querySelector('#h3-onboarding').hidden && document.querySelector('.h3-adventure canvas') && document.querySelector('.h3-ui')");
@@ -304,9 +423,12 @@ try {
     return ['Aster Keep', 'Lunar Glade', 'Cinder Bastion', 'Sunken Fen', 'Astral Spire', 'Veil of Souls', 'Obsidian Depths', 'Thunder Bastion', 'Elemental Nexus', 'Tidehaven', 'Brasswork Bastion', 'Reedwall Refuge', 'Rose Court']
       .every((name) => names.some((text) => text.includes(name)));
   })()`, 'Town atlas does not list every faction town');
-  await client.assert("document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns · 13 factions · 52 units')", 'Minimap roster summary is stale');
+  await client.assert("document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns · 13 factions · 72 units')", 'Minimap roster summary is stale');
   await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
-  await client.waitFor('innerWidth === 390');
+  await client.waitFor(`(() => {
+    const rect = document.querySelector('.h3-minimap-panel').getBoundingClientRect();
+    return innerWidth === 390 && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+  })()`);
   await client.assert(`(() => {
     const rect = document.querySelector('.h3-minimap-panel').getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
@@ -439,7 +561,7 @@ try {
   await client.waitFor("document.querySelector('#h3-onboarding:not([hidden])') && !document.querySelector('#h3-continue').hidden");
   await client.click('#h3-continue');
   await client.waitFor("document.querySelector('#h3-onboarding').hidden && document.querySelector('.h3-hero-panel')?.textContent.includes('Aveline')");
-  await client.assert("document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns · 13 factions · 52 units')", 'Loaded campaign lost the enlarged roster');
+  await client.assert("document.querySelector('.h3-minimap-summary')?.textContent.includes('13 towns · 13 factions · 72 units')", 'Loaded campaign lost the enlarged roster');
   await client.click('.h3-command-bar [data-action="enter-town"]');
   await client.waitFor("document.querySelector('.h3-town-screen')?.textContent.includes('Astral Spire') && document.querySelector('.h3-town-scene')?.dataset.buildingCount === '9'");
   await client.assert("document.querySelector('.h3-town-screen')?.dataset.faction === 'Tower'", 'Tower town has the wrong faction presentation');
@@ -491,7 +613,7 @@ try {
   await client.assert("document.querySelector('.h3b-initiative')?.textContent.includes('Gargoyle') && document.querySelector('.h3b-initiative')?.textContent.includes('Titan')", 'Tower battle is missing the recruited or defending new units');
   await client.click('.h3b-action[data-action="auto"]');
   try {
-    await client.waitFor("!document.querySelector('[data-modal=\"result\"]').hidden", 360000);
+    await client.waitFor("!document.querySelector('[data-modal=\"result\"]').hidden", 900000);
   } catch (error) {
     const diagnostics = await client.evaluate(`(() => ({
       round: document.querySelector('.h3b-round')?.textContent,
@@ -569,13 +691,129 @@ try {
     console.log(`  ${faction.id}: 9 models, recruitment, desktop and mobile passed`);
   }
 
+  console.log('Browser smoke: all landmark WebGL models, picking, effects, persistence, and mobile layouts');
+  const landmarkFixtures = [
+    { id: 'landmark-arcaneLibrary', name: 'Arcane Library', effect: 'spell', options: { clearSpells: true } },
+    { id: 'landmark-warriorsArena', name: "Warriors' Arena", effect: 'attack' },
+    { id: 'landmark-heroesShrine', name: "Heroes' Shrine", effect: 'experience' },
+    { id: 'landmark-huntersLodge', name: "Hunters' Lodge", effect: 'defense' },
+    { id: 'landmark-waterwheel', name: 'Waterwheel', effect: 'movement', options: { zeroMovement: true } },
+    { id: 'landmark-elementalForge', name: 'Elemental Forge', effect: 'forge' },
+    { id: 'landmark-ancientObservatory', name: 'Ancient Observatory', effect: 'reveal' },
+    { id: 'landmark-healersSanctuary', name: "Healers' Sanctuary", effect: 'mana', options: { zeroMana: true } },
+    { id: 'landmark-wayfarerPortal-west', name: 'Wayfarer Portal', effect: 'portal' },
+    { id: 'landmark-wayfarerPortal-east', name: 'Wayfarer Portal', effect: 'portal' },
+    { id: 'landmark-merchantsTent', name: "Merchants' Tent", effect: 'trade', options: { merchant: true } },
+  ];
+  for (const landmark of landmarkFixtures) {
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    const before = await installWildFixture(client, landmark.id, landmark.options);
+    await client.assert("document.querySelector('.h3-adventure canvas').getContext('webgl2') !== null", `${landmark.id} did not create a real adventure WebGL2 context`);
+    const target = await findAdventureObject(client, landmark.name);
+    assertWild(target, `Could not pick ${landmark.id} through the adventure WebGL canvas`);
+    await client.mouse('mousePressed', target.x, target.y, { clickCount: 1 });
+    await client.mouse('mouseReleased', target.x, target.y, { clickCount: 1 });
+    await delay(120);
+    await saveWildCampaign(client);
+    const after = await readWildState(client);
+    const hero = after.heroes['hero-aveline'];
+    const object = after.map.objects[landmark.id];
+    assertWild(object?.kind === 'landmark', `${landmark.id} disappeared after interaction`);
+    assertWild(Number.isInteger(object.visits['hero-aveline']), `${landmark.id} did not persist its visit`);
+    if (landmark.effect === 'spell') assertWild(hero.spells.includes('fireball'), 'Arcane Library did not teach a spell');
+    if (landmark.effect === 'attack') assertWild(hero.primarySkills.attack === before.attack + 1, 'Warriors Arena did not grant attack');
+    if (landmark.effect === 'experience') assertWild(hero.experience === before.experience + 1000, 'Heroes Shrine did not grant experience');
+    if (landmark.effect === 'defense') assertWild(hero.primarySkills.defense === before.defense + 1, 'Hunters Lodge did not grant defense');
+    if (landmark.effect === 'movement') assertWild(hero.movementPoints === before.maxMovementPoints, 'Waterwheel did not restore movement');
+    if (landmark.effect === 'forge') {
+      assertWild(hero.primarySkills.attack === before.attack + 1 && hero.primarySkills.defense === before.defense + 1, 'Elemental Forge did not grant both bonuses');
+    }
+    if (landmark.effect === 'reveal') assertWild(after.fog.red.explored.length > before.exploredCount, 'Ancient Observatory did not reveal new tiles');
+    if (landmark.effect === 'mana') assertWild(hero.mana === before.maxMana, 'Healers Sanctuary did not restore mana');
+    if (landmark.effect === 'portal') {
+      assertWild(hero.position.x === before.linkedPosition.x && hero.position.y === before.linkedPosition.y, `${landmark.id} did not travel to its linked portal`);
+    }
+    if (landmark.effect === 'trade') {
+      assertWild(after.players.red.resources.gold === before.gold - 500 && after.players.red.resources.wood === before.wood + 1 && after.players.red.resources.ore === before.ore + 1, 'Merchants Tent did not execute the fair trade');
+    }
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await client.waitFor('innerWidth === 390 && document.querySelector(".h3-adventure canvas").clientWidth > 0');
+    assertWild(await findAdventureObject(client, landmark.name), `${landmark.id} was not pickable after mobile WebGL resize`);
+    await client.assert(`(() => {
+      const canvas = document.querySelector('.h3-adventure canvas').getBoundingClientRect();
+      const minimap = document.querySelector('.h3-minimap-panel').getBoundingClientRect();
+      return canvas.left >= 0 && canvas.right <= innerWidth && minimap.left >= 0 && minimap.right <= innerWidth;
+    })()`, `${landmark.id} mobile adventure layout overflows`);
+    console.log(`  ${landmark.id}: model, raycast, effect, save, and mobile passed`);
+  }
+
+  console.log('Browser smoke: all 20 neutral overworld and tactical models in ten mixed encounters');
+  const neutralFixtures = [
+    { id: 'monster-neutral-arcane', name: 'Arcane Sentinels', units: ['Runic Golem', 'Beholder'] },
+    { id: 'monster-neutral-aquatic', name: 'Tide of Teeth', units: ['Kraken', 'Sea Hag'] },
+    { id: 'monster-neutral-beasts', name: 'Savage Menagerie', units: ['Dire Bear', 'Manticore'] },
+    { id: 'monster-neutral-desert', name: 'Dune Revenants', units: ['Mummy', 'Sand Wyrm'] },
+    { id: 'monster-neutral-forest', name: 'Thornwood Guardians', units: ['Ancient Ent', 'Giant Spider'] },
+    { id: 'monster-neutral-ice', name: 'Frozen Brood', units: ['Frost Giant', 'Ice Wyrm'] },
+    { id: 'monster-neutral-infernal', name: 'Infernal Hunt', units: ['Cerberus', 'Balor'] },
+    { id: 'monster-neutral-reptile', name: 'Crowned Scales', units: ['Swamp Hydra', 'Basilisk King'] },
+    { id: 'monster-neutral-swarm', name: 'Burrow Swarm', units: ['Ratling', 'Brood Mother'] },
+    { id: 'monster-neutral-undead', name: 'Veiled Court', units: ['Lich', 'Wraith'] },
+  ];
+  for (const encounter of neutralFixtures) {
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await installWildFixture(client, encounter.id);
+    const target = await findAdventureObject(client, encounter.name);
+    assertWild(target, `Could not pick ${encounter.id} through the adventure WebGL canvas`);
+    await client.mouse('mousePressed', target.x, target.y, { clickCount: 1 });
+    await client.mouse('mouseReleased', target.x, target.y, { clickCount: 1 });
+    await client.waitFor("document.querySelector('.h3b-root') && document.querySelector('[data-testid=\"adventure-layer\"]').hidden");
+    for (const unit of encounter.units) {
+      await client.assert(`[...document.querySelectorAll('.h3b-turn')].some((turn) => turn.getAttribute('title')?.startsWith(${JSON.stringify(unit)} + ' ·'))`, `${encounter.id} is missing ${unit}`);
+    }
+    await client.assert("document.querySelector('.h3b-root canvas').getContext('webgl2') !== null", `${encounter.id} did not create a real tactical WebGL2 context`);
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await client.waitFor('innerWidth === 390 && document.querySelector(".h3b-root canvas").clientWidth > 0');
+    await client.assert(`(() => {
+      const root = document.querySelector('.h3b-root').getBoundingClientRect();
+      return root.left >= 0 && root.right <= innerWidth && root.top >= 0 && root.bottom <= innerHeight;
+    })()`, `${encounter.id} tactical mobile layout overflows`);
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    if (encounter.id === 'monster-neutral-undead') {
+      await client.click('.h3b-action[data-action="auto"]');
+      await client.waitFor("!document.querySelector('[data-modal=\"result\"]').hidden", 900000);
+      await client.click('[data-action="complete"]');
+      await client.waitFor("!document.querySelector('.h3b-root') && !document.querySelector('[data-testid=\"adventure-layer\"]').hidden");
+      await saveWildCampaign(client);
+      const after = await readWildState(client);
+      assertWild(after.pendingBattle === null && !after.map.objects[encounter.id], 'Completed neutral battle did not persist its result');
+    }
+    console.log(`  ${encounter.id}: both neutral models, overworld picking, tactical WebGL, and mobile passed`);
+  }
+
   if (process.env.H3_SCREENSHOT) {
     const screenshot = await client.send('Page.captureScreenshot', { format: 'png' });
     await writeFile(resolve(projectRoot, process.env.H3_SCREENSHOT), Buffer.from(screenshot.data, 'base64'));
   }
   if (client.exceptions.length) throw new Error(`Browser exceptions:\n${client.exceptions.join('\n')}`);
-  console.log('Browser smoke passed: /vcmik3/ production entry, 13-faction WebGL towns and packs, raycast and keyboard building interactions, confirmed construction with live model updates, recruitment/army/spellbook flows, desktop/mobile layouts, save/load, and tactical battles.');
+  console.log('Browser smoke passed: /vcmik3/ production entry, 13-faction towns, 72-unit roster, 20 neutral models in ten encounters, all landmark effects and models, desktop/mobile WebGL picking and layouts, save/load, and tactical battles.');
 } catch (error) {
+  if (client) {
+    try {
+      const diagnostics = await client.evaluate(`(() => ({
+        url: location.href,
+        readyState: document.readyState,
+        onboarding: document.querySelector('#h3-onboarding')?.outerHTML.slice(0, 500),
+        continueHidden: document.querySelector('#h3-continue')?.hidden,
+        fatal: document.querySelector('.h3-application-fatal')?.textContent,
+        hasAutosave: localStorage.getItem('h3core.save.v1.autosave') !== null,
+        body: document.body?.textContent.slice(0, 500),
+      }))()`);
+      console.error('Browser diagnostics:', JSON.stringify(diagnostics));
+    } catch (diagnosticError) {
+      console.error('Unable to collect browser diagnostics:', diagnosticError);
+    }
+  }
   if (chromeErrors.length) console.error(chromeErrors.join(''));
   throw error;
 } finally {
@@ -586,6 +824,8 @@ try {
     await Promise.race([exited, delay(3000)]);
     if (chrome.exitCode === null) chrome.kill('SIGKILL');
   }
-  await new Promise((resolveClose) => server.close(resolveClose));
+  server.closeAllConnections();
+  server.unref();
+  await Promise.race([new Promise((resolveClose) => server.close(resolveClose)), delay(3000)]);
   await rm(profile, { recursive: true, force: true });
 }

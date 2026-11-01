@@ -1,4 +1,5 @@
 import { getTerrain } from '../game/content';
+import { isLandmarkUsed } from '../game/landmarks';
 import { getObjectAt, getTile, toTileIndex } from '../game/map';
 import type { GameState, MapObject, Point, ReachableTile } from '../game/types';
 import { getFactionVisual } from './presentation';
@@ -142,6 +143,10 @@ export class Minimap {
       context.lineTo(x + size * 0.88, y + size * 0.84);
       context.lineTo(x + size * 0.12, y + size * 0.84);
       context.closePath();
+    } else if (object.kind === 'landmark') {
+      const used = isLandmarkUsed(object, this.state.selectedHeroId ?? '', this.state.calendar.day);
+      context.fillStyle = used ? '#777b76' : object.landmarkId === 'wayfarerPortal' ? '#72d9e8' : '#e2c675';
+      context.rect(x + size * 0.18, y + size * 0.18, size * 0.64, size * 0.64);
     } else {
       context.fillStyle = '#b8d799';
       context.arc(centerX, centerY, size * 0.3, 0, Math.PI * 2);

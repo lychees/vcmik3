@@ -1,7 +1,13 @@
+import type { ExpandedSpellId, ExpandedStackModifiers } from '../game/spells';
 import type { BattleResult, PrimarySkills } from '../game/types';
 
 export type BattleSideId = 'attacker' | 'defender';
 export type StackStatus = 'haste' | 'slow' | 'shield' | 'bless';
+
+export interface ExpandedStackStatus {
+  duration: number;
+  modifiers: ExpandedStackModifiers;
+}
 
 export interface HexCoord {
   x: number;
@@ -35,6 +41,7 @@ export interface BattleStackState {
   waited: boolean;
   retaliationsUsed: number;
   statuses: Partial<Record<StackStatus, number>>;
+  expandedStatuses?: Partial<Record<ExpandedSpellId, ExpandedStackStatus>>;
 }
 
 export interface BattleHeroState {

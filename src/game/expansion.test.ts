@@ -131,13 +131,13 @@ function provideResources(state: GameState): void {
 }
 
 describe('thirteen-faction content registry', () => {
-  it('preserves all old IDs and provides exactly 13 balanced four-tier factions and 52 units', () => {
+  it('preserves all old IDs and provides 13 four-tier factions plus 20 neutral units', () => {
     expect(Object.keys(FACTIONS)).toHaveLength(13);
-    expect(Object.keys(CREATURES)).toHaveLength(52);
+    expect(Object.keys(CREATURES)).toHaveLength(72);
     expect(Object.keys(CREATURES)).toEqual(expect.arrayContaining([
       ...ORIGINAL_CREATURE_IDS, ...FIRST_EXPANSION_CREATURE_IDS,
     ]));
-    expect(new Set(Object.values(CREATURES).map((creature) => creature.name)).size).toBe(52);
+    expect(new Set(Object.values(CREATURES).map((creature) => creature.name)).size).toBe(72);
 
     for (const faction of Object.values(FACTIONS)) {
       const creatures = faction.creatureIds.map((id) => {

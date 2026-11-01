@@ -3,13 +3,19 @@ import '../town/factions';
 import { TownScene, type TownBuildingInteraction } from '../town/TownScene';
 import { MAX_ARMY_STACKS } from '../game/army';
 import {
-  RESOURCE_TYPES,
+  ARTIFACT_SLOTS,
+  aggregateArtifactBonuses,
+  getArtifact,
+  getEffectivePrimarySkills,
+} from '../game/artifacts';
+import {
   getBuilding,
   getCreature,
   getHeroDefinition,
-  getSpell,
 } from '../game/content';
 import { GameStore } from '../game/GameStore';
+import { EXTENDED_RESOURCE_TYPES as RESOURCE_TYPES } from '../game/resources';
+import { getCombatSpell } from '../game/spellbook';
 import { getObjectAt } from '../game/map';
 import type {
   GameEvent,
@@ -78,6 +84,7 @@ export class GameUI {
   private focusedTownBuildingId: string | null = null;
   private focusedCreatureId: string | null = null;
   private battleActive = false;
+  private editorActive = false;
   private minimapExpanded = false;
   private disposed = false;
 
@@ -199,8 +206,9 @@ export class GameUI {
     const focusTownId = activeElement?.dataset.townId;
     const focusDirection = activeElement?.dataset.direction;
     this.root.dataset.phase = state.phase;
+    this.root.dataset.editorActive = String(this.editorActive);
     this.root.dataset.townOpen = String(Boolean(this.activeTownId && !this.battleActive));
-    const adventureInert = this.battleActive || Boolean(this.activeTownId);
+    const adventureInert = this.battleActive || this.editorActive || Boolean(this.activeTownId);
     for (const selector of ['.h3-topbar', '.h3-hero-panel', '.h3-minimap-panel', '.h3-command-bar']) {
       this.query<HTMLElement>(selector).inert = adventureInert;
     }
@@ -212,8 +220,8 @@ export class GameUI {
     const battleStatus = this.query<HTMLElement>('.h3-battle-status');
     battleStatus.hidden = !this.battleActive;
     this.root.dataset.battleActive = String(this.battleActive);
-    this.minimap.setEnabled(!this.battleActive && state.phase === 'playing' && !state.pendingBattle && !this.activeTownId);
-    const reachable = !this.battleActive && !this.activeTownId ? this.store.getReachableTiles() : [];
+    this.minimap.setEnabled(!this.battleActive && !this.editorActive && state.phase === 'playing' && !state.pendingBattle && !this.activeTownId);
+    const reachable = !this.battleActive && !this.editorActive && !this.activeTownId ? this.store.getReachableTiles() : [];
     this.minimap.render(state, reachable);
     if (focusAction) {
       const candidates = [...this.root.querySelectorAll<HTMLElement>('[data-action]')];
@@ -253,6 +261,8 @@ export class GameUI {
     }
     const definition = getHeroDefinition(hero.definitionId);
     const progress = getLevelProgress(hero);
+    const effectiveSkills = getEffectivePrimarySkills(hero);
+    const artifactCount = Object.values(hero.artifacts.items).reduce((total, count) => total + count, 0);
     const skills: Array<{ key: keyof PrimarySkills; label: string; icon: 'sword' | 'shield' | 'spark' | 'book' }> = [
       { key: 'attack', label: 'Attack', icon: 'sword' },
       { key: 'defense', label: 'Defense', icon: 'shield' },
@@ -267,7 +277,7 @@ export class GameUI {
         ${creaturePortrait(stack.creatureId)}<strong>${formatNumber(stack.count)}</strong><small>${escapeHtml(creature.name)}</small>
       </div>`;
     }).join('');
-    const spells = hero.spells.map((id) => getSpell(id).name).join(' · ');
+    const spells = hero.spells.map((id) => getCombatSpell(id).name).join(' · ');
     panel.innerHTML = `
       <div class="h3-hero-heading">
         <div class="h3-portrait-frame">${heroPortrait(hero.definitionId, hero.name)}<span>LV ${hero.level}</span></div>
@@ -276,12 +286,16 @@ export class GameUI {
           <small>${formatNumber(progress.current)} / ${formatNumber(progress.required)} XP</small>
         </div>
       </div>
-      <div class="h3-primary-stats">${skills.map((skill) => `<div title="${skill.label}">${icon(skill.icon)}<span>${skill.label}</span><strong>${hero.primarySkills[skill.key]}</strong></div>`).join('')}</div>
+      <div class="h3-primary-stats">${skills.map((skill) => {
+        const bonus = effectiveSkills[skill.key] - hero.primarySkills[skill.key];
+        return `<div title="${skill.label}: ${effectiveSkills[skill.key]} total (${hero.primarySkills[skill.key]} base ${bonus >= 0 ? '+' : ''}${bonus} equipment)">${icon(skill.icon)}<span>${skill.label}</span><strong>${effectiveSkills[skill.key]}</strong></div>`;
+      }).join('')}</div>
       <div class="h3-vitals">
         <div><span>${icon('movement')} Movement</span><strong>${formatNumber(hero.movementPoints)} / ${formatNumber(hero.maxMovementPoints)}</strong><div class="h3-meter"><i style="width:${Math.max(0, Math.min(100, hero.movementPoints / hero.maxMovementPoints * 100))}%"></i></div></div>
         <div><span>${icon('mana')} Mana</span><strong>${hero.mana} / ${hero.maxMana}</strong><div class="h3-meter is-mana"><i style="width:${Math.max(0, Math.min(100, hero.mana / hero.maxMana * 100))}%"></i></div></div>
       </div>
       <section class="h3-army" aria-label="${escapeHtml(hero.name)} army"><header><h3>Army</h3><span>${formatNumber(armyCount(hero.army))} troops · ${hero.army.length}/${MAX_ARMY_STACKS} stacks</span></header><div class="h3-army-grid">${army}</div></section>
+      <button type="button" class="h3-button h3-equipment-button" data-action="open-inventory">${icon('shield')} Equipment <span>${artifactCount} in backpack</span></button>
       ${spells ? `<p class="h3-spell-line" title="${escapeHtml(spells)}">${icon('book')}<span>${escapeHtml(spells)}</span></p>` : ''}
     `;
   }
@@ -315,11 +329,13 @@ export class GameUI {
     setDisabled('end-turn', this.battleActive || state.phase !== 'playing' || Boolean(state.pendingBattle), state.pendingBattle ? 'Resolve the battle before ending the turn' : 'End turn (N)');
     const interact = this.root.querySelector<HTMLButtonElement>('[data-action="interact"] span');
     if (interact) {
-      interact.textContent = object?.kind === 'resource' ? 'Collect'
+      interact.textContent = object?.kind === 'resource' || object?.kind === 'artifact' ? 'Collect'
         : object?.kind === 'mine' ? 'Claim'
           : object?.kind === 'dwelling' ? 'Recruit'
             : object?.kind === 'monster' ? 'Battle'
-              : object?.kind === 'town' ? friendlyTown ? 'Enter town' : 'Besiege' : 'Interact';
+              : object?.kind === 'landmark' ? object.landmarkId === 'wayfarerPortal' ? 'Travel'
+                : object.landmarkId === 'merchantsTent' ? 'Trade' : 'Visit'
+                : object?.kind === 'town' ? friendlyTown ? 'Enter town' : 'Besiege' : 'Interact';
     }
     const minimapButton = this.root.querySelector<HTMLButtonElement>('[data-action="minimap-expand"]');
     minimapButton?.setAttribute('aria-pressed', String(this.minimapExpanded));
@@ -537,23 +553,33 @@ export class GameUI {
       return `<div class="h3-empty-state h3-large-empty" data-spellbook="locked">${icon('book')}<h2 data-spellbook-heading tabindex="-1">Mage Guild required</h2><p>Construct the Mage Guild to review the visiting hero’s spellbook.</p><button type="button" class="h3-button" data-action="town-focus-building" data-building-id="mageGuild">${icon('construction')} View Mage Guild construction</button></div>`;
     }
     const hero = this.getVisitingHero(town);
-    const spells = hero?.spells.map((id) => getSpell(id)) ?? [];
+    const spells = hero?.spells.map((id) => getCombatSpell(id)) ?? [];
     const effects = { heal: 'Restore health', damage: 'Magical damage', haste: 'Increase speed', slow: 'Reduce speed', shield: 'Increase defense', bless: 'Improve damage' } as const;
-    const targets = { self: 'Self', ally: 'One allied stack', enemy: 'One enemy stack', allEnemies: 'All enemy stacks' } as const;
+    const targets: Record<string, string> = {
+      self: 'Self', ally: 'One allied stack', enemy: 'One enemy stack', allEnemies: 'All enemy stacks',
+      all: 'Every stack on both sides', allAllies: 'All allied stacks', caster: 'Casting hero', enemyHero: 'Enemy hero',
+    };
+    const effectText = (spell: (typeof spells)[number]): string => typeof spell.effect === 'string'
+      ? `${effects[spell.effect]} · ${spell.power} power`
+      : spell.description;
     return `<section class="h3-spellbook" data-spellbook="ready"><header class="h3-section-heading"><div><p class="h3-eyebrow">Mage Guild repository</p><h2 data-spellbook-heading tabindex="-1">Hero spellbook</h2><p>Review the spells known by the visiting hero. Casting remains part of tactical combat.</p></div><span>${hero ? `${escapeHtml(hero.name)} · ${hero.mana}/${hero.maxMana} mana` : 'No visiting hero'}</span></header>
       ${hero ? `<div class="h3-spellbook-hero"><div class="h3-portrait-frame">${heroPortrait(hero.definitionId, hero.name)}<span>LV ${hero.level}</span></div><div><h3>${escapeHtml(hero.name)}</h3><p>${spells.length} known spells · Spell power ${hero.primarySkills.spellPower} · Knowledge ${hero.primarySkills.knowledge}</p><div class="h3-meter is-mana" aria-label="${hero.mana} of ${hero.maxMana} mana"><i style="width:${Math.max(0, Math.min(100, hero.mana / hero.maxMana * 100))}%"></i></div></div></div>` : `<p class="h3-town-tip">${icon('info')} Bring a friendly hero to ${escapeHtml(town.name)} to open their spellbook.</p>`}
-      ${hero && spells.length ? `<div class="h3-spell-grid">${spells.map((spell) => `<article class="h3-spell-card" data-spell-id="${escapeHtml(spell.id)}"><header><span>${icon('spark')}</span><div><h3>${escapeHtml(spell.name)}</h3><p>Level ${spell.level} · ${escapeHtml(spell.school)} magic</p></div><strong>${spell.manaCost} mana</strong></header><dl><div><dt>Effect</dt><dd>${effects[spell.effect]} · ${spell.power} power</dd></div><div><dt>Target</dt><dd>${targets[spell.target]}</dd></div></dl></article>`).join('')}</div>` : hero ? '<p class="h3-empty-state">This hero has not learned any spells.</p>' : ''}
+      ${hero && spells.length ? `<div class="h3-spell-grid">${spells.map((spell) => `<article class="h3-spell-card" data-spell-id="${escapeHtml(spell.id)}"><header><span>${icon('spark')}</span><div><h3>${escapeHtml(spell.name)}</h3><p>Level ${spell.level} · ${escapeHtml(spell.school)} magic</p></div><strong>${spell.manaCost} mana</strong></header><dl><div><dt>Effect</dt><dd>${escapeHtml(effectText(spell))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(targets[spell.target] ?? spell.target)}</dd></div></dl></article>`).join('')}</div>` : hero ? '<p class="h3-empty-state">This hero has not learned any spells.</p>' : ''}
       <p class="h3-town-tip">${icon('info')} The spellbook reflects the hero’s current saved spell list and mana. It does not teach spells, spend mana, or bypass combat rules.</p>
     </section>`;
   }
 
   private readonly handleClick = (event: MouseEvent): void => {
+    if (this.editorActive) return;
     const target = event.target instanceof Element ? event.target : null;
     const button = target?.closest<HTMLButtonElement>('button[data-action]');
     if (!button || !this.root.contains(button) || button.disabled) return;
     const action = button.dataset.action;
     if (action === 'game-menu') this.openGameMenu();
     else if (action === 'help') this.openHelp();
+    else if (action === 'open-inventory') this.openInventory();
+    else if (action === 'equip-artifact' && button.dataset.artifactId) this.changeEquipment('equip', button.dataset.artifactId);
+    else if (action === 'unequip-artifact' && button.dataset.slot) this.changeEquipment('unequip', button.dataset.slot);
     else if (action === 'previous-hero') this.cycleHero(-1);
     else if (action === 'next-hero') this.cycleHero(1);
     else if (action === 'interact') this.interact();
@@ -619,7 +645,7 @@ export class GameUI {
   };
 
   private readonly handleKeyDown = (event: KeyboardEvent): void => {
-    if (this.disposed || this.battleActive || event.defaultPrevented || this.dialogs.isOpen) return;
+    if (this.disposed || this.battleActive || this.editorActive || event.defaultPrevented || this.dialogs.isOpen) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (target?.matches('input, textarea, select, [contenteditable="true"]')) return;
     const key = event.key.toLowerCase();
@@ -664,7 +690,7 @@ export class GameUI {
   };
 
   private readonly handleAdventureInteraction = (event: Event): void => {
-    if (this.handledInteractionEvents.has(event)) return;
+    if (this.editorActive || this.handledInteractionEvents.has(event)) return;
     this.handledInteractionEvents.add(event);
     const detail = event instanceof CustomEvent ? event.detail as unknown : null;
     if (!detail || typeof detail !== 'object') return;
@@ -721,8 +747,21 @@ export class GameUI {
     else if (interaction.kind === 'dwelling') this.openDwelling(interaction.dwellingId, heroId);
     else if (interaction.kind === 'resource') {
       this.notify('Treasure claimed', `${interaction.message} ${formatCost(interaction.resources)}`, 'success');
+    } else if (interaction.kind === 'artifact') {
+      const artifact = getArtifact(interaction.artifactId);
+      this.notify('Artifact found', interaction.message, 'success');
+      if (artifact) this.notify('Equipment ready', `${artifact.name} is in the hero’s backpack. Open Equipment to equip it.`, 'info', 5000);
     } else if (interaction.kind === 'mine') {
       this.notify('Mine claimed', interaction.message, 'success');
+    } else if (interaction.kind === 'landmark') {
+      const title = interaction.effect === 'portal' ? 'Portal traversed'
+        : interaction.effect === 'trade' ? 'Merchant trade'
+          : interaction.effect === 'spell' ? 'Spell learned'
+            : interaction.effect === 'experience' ? 'Hero inspired'
+              : interaction.effect === 'reveal' ? 'Realm revealed'
+                : interaction.effect === 'movement' || interaction.effect === 'mana' ? 'Hero restored' : 'Landmark visited';
+      const unavailable = /already|occupied|requires/.test(interaction.message);
+      this.notify(title, interaction.message, unavailable ? 'info' : 'success');
     } else if (interaction.kind === 'none') {
       this.notify('Nothing here', interaction.message, 'info', 3000);
     }
@@ -984,6 +1023,52 @@ export class GameUI {
     });
   }
 
+  private openInventory(): void {
+    const hero = this.store.getSelectedHero();
+    if (!hero || this.battleActive) return;
+    const bonuses = aggregateArtifactBonuses(hero.artifacts);
+    const equipped = ARTIFACT_SLOTS.map((slot) => {
+      const id = hero.artifacts.equipped[slot];
+      const artifact = id ? getArtifact(id) : undefined;
+      return `<article class="h3-equipment-slot" data-slot="${slot}"><header><strong>${slot}</strong><span>${artifact ? escapeHtml(artifact.rarity) : 'Empty'}</span></header>
+        ${artifact ? `<h3>${escapeHtml(artifact.name)}</h3><p>${escapeHtml(artifact.description)}</p><small>${Object.entries(artifact.bonuses).map(([stat, amount]) => `+${amount} ${stat}`).join(' · ')}</small>
+          <button type="button" class="h3-button is-secondary" data-action="unequip-artifact" data-slot="${slot}">Unequip</button>` : '<p>No artifact equipped in this slot.</p>'}
+      </article>`;
+    }).join('');
+    const items = Object.entries(hero.artifacts.items).map(([id, count]) => ({ artifact: getArtifact(id), id, count }))
+      .filter((entry): entry is { artifact: NonNullable<ReturnType<typeof getArtifact>>; id: string; count: number } => Boolean(entry.artifact))
+      .sort((a, b) => a.artifact.name.localeCompare(b.artifact.name));
+    const backpack = items.length > 0 ? items.map(({ artifact, id, count }) => {
+      const equippedId = hero.artifacts.equipped[artifact.slot];
+      return `<article class="h3-artifact-card" data-artifact-id="${escapeHtml(id)}"><header><div><h3>${escapeHtml(artifact.name)}</h3><p>${artifact.rarity} · ${artifact.slot}</p></div><strong>×${count}</strong></header>
+        <p>${escapeHtml(artifact.description)}</p><small>${Object.entries(artifact.bonuses).map(([stat, amount]) => `+${amount} ${stat}`).join(' · ')}</small>
+        <button type="button" class="h3-button" data-action="equip-artifact" data-artifact-id="${escapeHtml(id)}" ${equippedId === id ? 'disabled' : ''}>${equippedId === id ? 'Equipped' : equippedId ? `Replace ${escapeHtml(getArtifact(equippedId)?.name ?? equippedId)}` : 'Equip'}</button>
+      </article>`;
+    }).join('') : '<p class="h3-empty-state">The backpack is empty. Explore the realm to collect artifacts.</p>';
+    this.dialogs.show({
+      title: `${hero.name} · Equipment`,
+      eyebrow: 'Artifacts apply only while equipped',
+      className: 'h3-wide-dialog h3-inventory-dialog',
+      body: `<div class="h3-equipment-summary"><strong>Equipped bonuses</strong><span>Attack +${bonuses.attack}</span><span>Defense +${bonuses.defense}</span><span>Spell power +${bonuses.spellPower}</span><span>Knowledge +${bonuses.knowledge}</span></div>
+        <section><h3>Equipped slots</h3><div class="h3-equipment-grid">${equipped}</div></section>
+        <section><h3>Backpack</h3><div class="h3-artifact-grid">${backpack}</div></section>`,
+      actions: [{ label: 'Return to adventure', className: 'is-secondary' }],
+    });
+  }
+
+  private changeEquipment(action: 'equip' | 'unequip', id: string): void {
+    const hero = this.store.getSelectedHero();
+    if (!hero) return;
+    const result = action === 'equip' ? this.store.equipArtifact(hero.id, id) : this.store.unequipArtifact(hero.id, id);
+    if (!result.ok) {
+      this.notify('Equipment unavailable', result.error, 'warning');
+      return;
+    }
+    this.notify(action === 'equip' ? 'Artifact equipped' : 'Artifact unequipped', `${hero.name}'s effective stats and mana capacity were updated.`, 'success', 3000);
+    this.dialogs.close();
+    this.openInventory();
+  }
+
   private openHelp(): void {
     this.dialogs.show({
       title: 'Field guide to Aster Vale',
@@ -995,7 +1080,10 @@ export class GameUI {
         <section><h3>${icon('castle')} Towns & armies</h3><p>Every faction’s buildings appear in its interactive 3D town. Click a built dwelling for its recruitment card, the Fort for army transfers, the Mage Guild for the visiting hero’s spellbook, or a civic building for economy details.</p><p>Click an unbuilt model to focus its construction card. Costs, prerequisites, the one-project-per-day limit, and confirmation still apply. Creature growth arrives weekly; income arrives daily.</p></section>
         <section><h3>${icon('construction')} Town model & keyboard</h3><p>Drag to pan, right-drag to rotate, and use the wheel or camera buttons to zoom. The Town buildings list provides a button for every model, including touch and keyboard access.</p><p>On the town canvas, <kbd>Arrow keys</kbd> pan, <kbd>Q</kbd>/<kbd>E</kbd> rotate, <kbd>[</kbd>/<kbd>]</kbd> select buildings, and <kbd>Enter</kbd> activates the selection. Use the town tabs for the same functions without clicking a model.</p></section>
         <section><h3>${icon('endTurn')} Turns & battle</h3><p>End the turn to restore hero movement and mana, collect town and mine income, and allow opposing players to act. Monday brings new creature growth.</p><p>Moving onto hostile forces creates a battle handoff. The tactical battlefield takes control; adventure commands resume only after its result is applied to the campaign.</p></section>
-        <section><h3>${icon('map')} Realm roster</h3><p>${ROSTER_COUNTS.factions} factions field ${ROSTER_COUNTS.units} units across four tiers per faction. Every town has its own construction chain and recruitment pool.</p><p>Expand the strategic map to open the town atlas. It lists every town in the current campaign, including older two- and four-town saves, with faction colors and ownership.</p></section>
+        <section><h3>${icon('spark')} Hero magic</h3><p>Heroes can know up to 19 spells across four schools. Cast once per round during your own army’s turn, with valid targets and enough mana. Mass and hero-targeted spells resolve immediately; ally and enemy spells use highlighted targets.</p><p>Spell Power strengthens expanded effects. Mana spent in tactical combat is returned with the result and preserved in saves.</p></section>
+        <section><h3>${icon('shield')} Resources & equipment</h3><p>The realm tracks gold, six classic materials, mithril, obsidian, and essence. Collect caches and claim mines for daily income; advanced construction spends all ten types.</p><p>Twenty artifact pickups wait on the map. Open Equipment in the hero panel to equip or unequip five slots. Only equipped artifacts add Attack, Defense, Spell Power, and Knowledge.</p></section>
+        <section><h3>${icon('construction')} Content editor</h3><p>Open Content editor from onboarding or the lower-right adventure button. Create and validate custom creatures and artifacts, import or export versioned JSON, and keep the registry in local browser storage.</p><p>Choose a custom creature and optional artifact to start a real sandbox battle. Sandbox results never change campaign armies, resources, pending battles, or saves.</p></section>
+        <section><h3>${icon('map')} Realm roster</h3><p>${ROSTER_COUNTS.factions} factions field ${ROSTER_COUNTS.factions * ROSTER_COUNTS.tiers} recruitable units, alongside ${ROSTER_COUNTS.units - ROSTER_COUNTS.factions * ROSTER_COUNTS.tiers} neutral creatures. Every town has its own construction chain and recruitment pool.</p><p>Expand the strategic map to open the town atlas. It lists every town in the current campaign, including older two- and four-town saves, with faction colors and ownership.</p></section>
       </div>
       <section class="h3-shortcuts"><h3>Interface shortcuts</h3><div><span><kbd>H</kbd> Next hero</span><span><kbd>Shift + H</kbd> Previous hero</span><span><kbd>Space</kbd> Interact</span><span><kbd>T</kbd> Enter town</span><span><kbd>N</kbd> End turn</span><span><kbd>M</kbd> Expand map</span><span><kbd>Ctrl / ⌘ + S</kbd> Save</span><span><kbd>Ctrl / ⌘ + O</kbd> Campaign menu</span><span><kbd>?</kbd> Field guide</span><span><kbd>Esc</kbd> Leave town / close dialog</span></div></section>`,
       actions: [{ label: 'Ready for adventure', icon: 'check', autofocus: true }],
@@ -1124,6 +1212,16 @@ export class GameUI {
     toast.querySelector('button')?.addEventListener('click', remove);
     timer = setTimeout(remove, duration);
     this.toastTimers.add(timer);
+  }
+
+  setEditorActive(active: boolean): void {
+    if (this.disposed) return;
+    this.editorActive = active;
+    if (active) {
+      this.minimapExpanded = false;
+      this.dialogs.clear();
+    }
+    this.render();
   }
 
   setBattleActive(active: boolean): void {

@@ -4,6 +4,14 @@ import {
   NEW_CREATURES,
   NEW_HEROES,
 } from './factions';
+import { NEUTRAL_CREATURES } from './neutral';
+import {
+  addExtendedResources,
+  canAffordExtendedResources,
+  CORE_RESOURCE_TYPES,
+  createExtendedResourceBundle,
+  spendExtendedResources,
+} from './resources';
 import type {
   BuildingDefinition,
   CreatureDefinition,
@@ -17,15 +25,9 @@ import type {
   TerrainType,
 } from './types';
 
-export const RESOURCE_TYPES = [
-  'gold',
-  'wood',
-  'ore',
-  'crystal',
-  'gems',
-  'mercury',
-  'sulfur',
-] as const satisfies readonly ResourceType[];
+export const RESOURCE_TYPES = CORE_RESOURCE_TYPES satisfies readonly ResourceType[];
+
+let customCreatures: Record<string, CreatureDefinition> = Object.create(null) as Record<string, CreatureDefinition>;
 
 export const TERRAIN: Record<TerrainType, TerrainDefinition> = {
   grass: { id: 'grass', name: 'Meadow', movementCost: 100, passable: true, color: 0x6f9f55 },
@@ -119,6 +121,7 @@ export const CREATURES: Record<string, CreatureDefinition> = {
     cost: { gold: 875, crystal: 2 }, growth: 2, abilities: ['regeneration', 'spellResistance'],
   },
   ...NEW_CREATURES,
+  ...NEUTRAL_CREATURES,
 };
 
 export const BUILDINGS: Record<string, BuildingDefinition> = {
@@ -128,7 +131,7 @@ export const BUILDINGS: Record<string, BuildingDefinition> = {
   },
   capitol: {
     id: 'capitol', name: 'Capitol', description: 'Provides 1,000 additional gold each day.',
-    cost: { gold: 5000, wood: 5, ore: 5, crystal: 3 }, prerequisites: ['townHall'], dailyIncome: { gold: 1000 },
+    cost: { gold: 5000, wood: 5, ore: 5, crystal: 3, mithril: 2, obsidian: 1 }, prerequisites: ['townHall'], dailyIncome: { gold: 1000 },
   },
   market: {
     id: 'market', name: 'Market', description: 'Provides 250 gold in daily trade.',
@@ -140,7 +143,7 @@ export const BUILDINGS: Record<string, BuildingDefinition> = {
   },
   mageGuild: {
     id: 'mageGuild', name: 'Mage Guild', description: 'A repository for adventure and battle magic.',
-    cost: { gold: 1200, wood: 5, ore: 5, mercury: 2 }, prerequisites: ['townHall'],
+    cost: { gold: 1200, wood: 5, ore: 5, mercury: 2, essence: 1 }, prerequisites: ['townHall'],
   },
   militiaBarracks: {
     id: 'militiaBarracks', name: 'Militia Barracks', description: 'Recruit Militia.',
@@ -250,11 +253,14 @@ export const HEROES: Record<string, HeroDefinition> = {
 export { FACTIONS };
 
 export function emptyResources(): ResourceBundle {
-  return { gold: 0, wood: 0, ore: 0, crystal: 0, gems: 0, mercury: 0, sulfur: 0 };
+  return createExtendedResourceBundle();
 }
 
 export function startingResources(): ResourceBundle {
-  return { gold: 6000, wood: 25, ore: 25, crystal: 8, gems: 8, mercury: 8, sulfur: 8 };
+  return createExtendedResourceBundle({
+    gold: 6000, wood: 25, ore: 25, crystal: 8, gems: 8, mercury: 8, sulfur: 8,
+    mithril: 4, obsidian: 4, essence: 4,
+  });
 }
 
 export function getFaction(id: string): FactionDefinition {
@@ -263,8 +269,25 @@ export function getFaction(id: string): FactionDefinition {
   return faction;
 }
 
+export function registerCustomCreatures(definitions: readonly CreatureDefinition[]): void {
+  const next: Record<string, CreatureDefinition> = Object.create(null) as Record<string, CreatureDefinition>;
+  for (const definition of definitions) {
+    if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(definition.id) || Object.hasOwn(CREATURES, definition.id) ||
+      Object.hasOwn(next, definition.id)) throw new Error(`Invalid or duplicate custom creature: ${definition.id}`);
+    next[definition.id] = {
+      ...definition,
+      damage: [definition.damage[0], definition.damage[1]],
+      cost: { ...definition.cost },
+      abilities: [...definition.abilities],
+    };
+  }
+  customCreatures = next;
+}
+
 export function getCreature(id: string): CreatureDefinition {
-  const creature = Object.hasOwn(CREATURES, id) ? CREATURES[id] : undefined;
+  const creature = Object.hasOwn(CREATURES, id)
+    ? CREATURES[id]
+    : Object.hasOwn(customCreatures, id) ? customCreatures[id] : undefined;
   if (!creature) throw new Error(`Unknown creature: ${id}`);
   return creature;
 }
@@ -294,15 +317,18 @@ export function getTerrain(id: TerrainType): TerrainDefinition {
 }
 
 export function canAfford(resources: ResourceBundle, cost: ResourceCost): boolean {
-  return RESOURCE_TYPES.every((resource) => resources[resource] >= (cost[resource] ?? 0));
+  return canAffordExtendedResources(resources, cost);
 }
 
 export function spendResources(resources: ResourceBundle, cost: ResourceCost): boolean {
-  if (!canAfford(resources, cost)) return false;
-  for (const resource of RESOURCE_TYPES) resources[resource] -= cost[resource] ?? 0;
+  const spent = spendExtendedResources(resources, cost);
+  if (!spent) return false;
+  Object.assign(resources, spent);
   return true;
 }
 
 export function addResources(resources: ResourceBundle, gain: ResourceCost): void {
-  for (const resource of RESOURCE_TYPES) resources[resource] += gain[resource] ?? 0;
+  const added = addExtendedResources(resources, gain);
+  if (!added) throw new Error('Resource amounts must remain nonnegative safe integers');
+  Object.assign(resources, added);
 }

@@ -1,5 +1,16 @@
-import { BUILDINGS, CREATURES, HEROES, RESOURCE_TYPES, SPELLS, TERRAIN } from './content';
-import type { GameState } from './types';
+import { createArtifactInventory, getArtifact, isValidArtifactInventory, synchronizeHeroMana } from './artifacts';
+import { BUILDINGS, CREATURES, HEROES, TERRAIN } from './content';
+import { isLandmarkType } from './landmarks';
+import {
+  CORE_RESOURCE_TYPES,
+  createExtendedResourceBundle,
+  EXTENDED_RESOURCE_TYPES as RESOURCE_TYPES,
+  NEW_RESOURCES,
+  NEW_RESOURCE_TYPES,
+} from './resources';
+import { getReachableTiles } from './pathfinding';
+import { isCombatSpellId } from './spellbook';
+import type { AdventureMap, BattleSide, GameState, HeroState, Point } from './types';
 
 export const SAVE_KEY_PREFIX = 'h3core.save.v1.';
 
@@ -13,12 +24,8 @@ function hasOwnRecord(record: Record<string, unknown>, id: unknown): id is strin
   return typeof id === 'string' && Object.hasOwn(record, id) && isRecord(record[id]);
 }
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
-}
-
 function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isPositiveInteger(value: unknown): value is number {
@@ -26,14 +33,14 @@ function isPositiveInteger(value: unknown): value is number {
 }
 
 function validResources(value: unknown): boolean {
-  return isRecord(value) && Object.keys(value).length === RESOURCE_TYPES.length &&
-    RESOURCE_TYPES.every((resource) => Object.hasOwn(value, resource) &&
-      isFiniteNumber(value[resource]) && value[resource] >= 0);
+  return isRecord(value) && CORE_RESOURCE_TYPES.every((resource) => Object.hasOwn(value, resource)) &&
+    Object.entries(value).every(([resource, amount]) =>
+      RESOURCE_TYPES.some((type) => type === resource) && isNonNegativeInteger(amount));
 }
 
 function validResourceCost(value: unknown): boolean {
   return isRecord(value) && Object.entries(value).every(([resource, amount]) =>
-    RESOURCE_TYPES.some((type) => type === resource) && isFiniteNumber(amount) && amount >= 0);
+    RESOURCE_TYPES.some((type) => type === resource) && isNonNegativeInteger(amount));
 }
 
 function validPrimarySkills(value: unknown): boolean {
@@ -69,6 +76,7 @@ function validMapObject(value: unknown, players: Record<string, unknown>, width:
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.name !== 'string' ||
     !validPoint(value.position, width, height) || typeof value.kind !== 'string') return false;
   if (value.kind === 'resource') return validResourceCost(value.resources);
+  if (value.kind === 'artifact') return typeof value.artifactId === 'string' && Boolean(getArtifact(value.artifactId));
   if (value.kind === 'mine') {
     return (value.ownerId === null || hasOwnRecord(players, value.ownerId)) &&
       typeof value.resource === 'string' && RESOURCE_TYPES.some((resource) => resource === value.resource) &&
@@ -82,7 +90,28 @@ function validMapObject(value: unknown, players: Record<string, unknown>, width:
     return validArmy(value.army) && isNonNegativeInteger(value.experienceReward) &&
       validResourceCost(value.treasure);
   }
+  if (value.kind === 'landmark') {
+    if (typeof value.landmarkId !== 'string' || !isLandmarkType(value.landmarkId) ||
+      !isRecord(value.visits) || typeof value.depleted !== 'boolean') return false;
+    const visitsValid = Object.entries(value.visits).every(([heroId, day]) =>
+      heroId.length > 0 && isPositiveInteger(day));
+    const linkValid = value.landmarkId === 'wayfarerPortal'
+      ? typeof value.linkedObjectId === 'string' && value.linkedObjectId.length > 0
+      : value.linkedObjectId === null;
+    return visitsValid && linkValid;
+  }
   return value.kind === 'town' && typeof value.townId === 'string';
+}
+
+function validPortalLinks(objects: Record<string, unknown>): boolean {
+  return Object.values(objects).every((object) => {
+    if (!isRecord(object) || object.kind !== 'landmark' || object.landmarkId !== 'wayfarerPortal') return true;
+    if (typeof object.id !== 'string' || typeof object.linkedObjectId !== 'string' ||
+      object.linkedObjectId === object.id || !hasOwnRecord(objects, object.linkedObjectId)) return false;
+    const linked = objects[object.linkedObjectId];
+    return isRecord(linked) && linked.kind === 'landmark' && linked.landmarkId === 'wayfarerPortal' &&
+      linked.linkedObjectId === object.id;
+  });
 }
 
 function validHero(
@@ -98,7 +127,9 @@ function validHero(
     validPrimarySkills(value.primarySkills) && isNonNegativeInteger(value.mana) &&
     isPositiveInteger(value.maxMana) && isNonNegativeInteger(value.movementPoints) &&
     isPositiveInteger(value.maxMovementPoints) && validArmy(value.army) && Array.isArray(value.spells) &&
-    value.spells.every((spell) => typeof spell === 'string' && Object.hasOwn(SPELLS, spell)) &&
+    new Set(value.spells).size === value.spells.length &&
+    value.spells.every((spell) => typeof spell === 'string' && isCombatSpellId(spell)) &&
+    (value.artifacts === undefined || isValidArtifactInventory(value.artifacts)) &&
     typeof value.alive === 'boolean';
 }
 
@@ -120,10 +151,17 @@ function validTown(
 }
 
 function validBattleSide(value: unknown, players: Record<string, unknown>): boolean {
-  return isRecord(value) && typeof value.ownerId === 'string' &&
-    (value.ownerId === 'neutral' || hasOwnRecord(players, value.ownerId)) &&
-    (value.heroId === null || typeof value.heroId === 'string') &&
-    validPrimarySkills(value.primarySkills) && validArmy(value.army);
+  if (!isRecord(value) || typeof value.ownerId !== 'string' ||
+    (value.ownerId !== 'neutral' && !hasOwnRecord(players, value.ownerId)) ||
+    (value.heroId !== null && typeof value.heroId !== 'string') ||
+    !validPrimarySkills(value.primarySkills) || !validArmy(value.army)) return false;
+  if (value.spells !== undefined && (!Array.isArray(value.spells) ||
+    new Set(value.spells).size !== value.spells.length ||
+    !value.spells.every((spell) => typeof spell === 'string' && isCombatSpellId(spell)))) return false;
+  if (value.maxMana !== undefined && !isNonNegativeInteger(value.maxMana)) return false;
+  if (value.mana !== undefined && (!isNonNegativeInteger(value.mana) ||
+    typeof value.maxMana !== 'number' || value.mana > value.maxMana)) return false;
+  return true;
 }
 
 function validBattleRewards(value: unknown): boolean {
@@ -174,7 +212,7 @@ export function isGameState(value: unknown): value is GameState {
 
   const objects = map.objects;
   if (!Object.entries(objects).every(([id, object]) => validMapObject(object, players, width, height) &&
-    (object as Record<string, unknown>).id === id)) return false;
+    (object as Record<string, unknown>).id === id) || !validPortalLinks(objects)) return false;
   const tilesValid = tiles.every((tile, index) => {
     if (!isRecord(tile) || tile.x !== index % width || tile.y !== Math.floor(index / width) ||
       typeof tile.terrain !== 'string' || !Object.hasOwn(TERRAIN, tile.terrain) ||
@@ -230,6 +268,95 @@ export function isGameState(value: unknown): value is GameState {
   return value.pendingBattle === null || validPendingBattle(value.pendingBattle, players, heroes, towns, objects);
 }
 
+function migrateHero(hero: HeroState): void {
+  if (!hero.artifacts) hero.artifacts = createArtifactInventory();
+  else hero.artifacts = {
+    items: { ...hero.artifacts.items },
+    equipped: { ...hero.artifacts.equipped },
+  };
+  hero.spells = [...hero.spells];
+  synchronizeHeroMana(hero);
+}
+
+function migrateBattleSide(side: BattleSide, hero: HeroState | undefined): void {
+  if (!hero) return;
+  side.spells = [...(side.spells ?? hero.spells)];
+  side.maxMana = side.maxMana ?? hero.maxMana;
+  side.mana = Math.min(side.mana ?? hero.mana, side.maxMana);
+}
+
+function findLegacyMinePosition(map: AdventureMap, preferred: Point, reachable: ReadonlySet<number>): Point {
+  const tile = map.tiles
+    .filter((candidate) => !candidate.obstacle && candidate.objectId === null &&
+      reachable.has(candidate.y * map.width + candidate.x))
+    .sort((a, b) => Number(b.road) - Number(a.road) ||
+      Math.abs(a.x - preferred.x) + Math.abs(a.y - preferred.y) -
+        (Math.abs(b.x - preferred.x) + Math.abs(b.y - preferred.y)) ||
+      a.y - b.y || a.x - b.x)[0];
+  if (!tile) throw new Error('Unable to migrate expanded-resource mines onto the legacy map');
+  return { x: tile.x, y: tile.y };
+}
+
+function migrateLegacyResourceSources(state: GameState): void {
+  const { map } = state;
+  const roadY = Math.floor(map.height / 2);
+  const roadX = Math.floor(map.width / 2);
+  const anchor = Object.values(state.heroes).find((hero) => hero.alive)?.position ??
+    Object.values(map.objects).find((object) => object.kind === 'town')?.position ?? { x: 0, y: 0 };
+  const reachable = new Set(getReachableTiles(map, anchor, Number.POSITIVE_INFINITY)
+    .map((tile) => tile.tileIndex));
+  const preferredPositions: readonly Point[] = [
+    { x: 9, y: roadY + 6 },
+    { x: roadX + 7, y: roadY - 6 },
+    { x: map.width - 10, y: roadY + 6 },
+  ];
+  for (const [index, resource] of NEW_RESOURCE_TYPES.entries()) {
+    const hasMine = Object.values(map.objects).some((object) =>
+      object.kind === 'mine' && object.resource === resource);
+    if (hasMine) continue;
+    const baseId = `${resource}-mine`;
+    const id = Object.hasOwn(map.objects, baseId) ? `legacy-${baseId}` : baseId;
+    if (Object.hasOwn(map.objects, id)) throw new Error(`Unable to migrate legacy resource mine: ${id}`);
+    const position = findLegacyMinePosition(
+      map,
+      preferredPositions[index] ?? { x: roadX, y: roadY },
+      reachable,
+    );
+    const definition = NEW_RESOURCES[resource];
+    map.objects[id] = {
+      id,
+      kind: 'mine',
+      name: `${definition.name} Mine`,
+      ownerId: null,
+      resource,
+      dailyOutput: definition.mineDailyOutput,
+      position,
+    };
+    const tile = map.tiles[position.y * map.width + position.x];
+    if (!tile) throw new Error(`Legacy resource mine is outside the map: ${id}`);
+    tile.objectId = id;
+  }
+}
+
+function migrateGameState(state: GameState): GameState {
+  for (const player of Object.values(state.players)) {
+    player.resources = createExtendedResourceBundle(player.resources);
+  }
+  migrateLegacyResourceSources(state);
+  for (const hero of Object.values(state.heroes)) migrateHero(hero);
+  if (state.pendingBattle) {
+    migrateBattleSide(
+      state.pendingBattle.attacker,
+      state.heroes[state.pendingBattle.attacker.heroId ?? ''],
+    );
+    migrateBattleSide(
+      state.pendingBattle.defender,
+      state.heroes[state.pendingBattle.defender.heroId ?? ''],
+    );
+  }
+  return state;
+}
+
 export function serializeGameState(state: GameState): string {
   return JSON.stringify(state);
 }
@@ -238,7 +365,7 @@ export function parseGameState(serialized: string): GameState {
   try {
     const parsed: unknown = JSON.parse(serialized);
     if (!isGameState(parsed)) throw new Error('Save data is not a valid H3CORE game');
-    return parsed;
+    return migrateGameState(parsed);
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : 'Unable to read save data');
   }

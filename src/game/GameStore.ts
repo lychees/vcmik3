@@ -6,14 +6,33 @@ import {
   isSurvivingArmy,
   removeFromArmy,
 } from './army';
-import { cloneBattleSetup, resolveBattleAutomatically } from './combat';
+import { runTacticalAutoBattle } from '../battle/BattleAI';
+import {
+  addArtifact,
+  equipArtifact as equipInventoryArtifact,
+  getArtifact,
+  getEffectivePrimarySkills,
+  getHeroMaxMana,
+  synchronizeHeroMana,
+  unequipArtifact as unequipInventoryArtifact,
+} from './artifacts';
+import { cloneBattleSetup } from './combat';
 import {
   addResources,
   getBuilding,
   getCreature,
-  RESOURCE_TYPES,
   spendResources,
 } from './content';
+import { EXTENDED_RESOURCE_TYPES as RESOURCE_TYPES } from './resources';
+import {
+  isLandmarkUsed,
+  LANDMARK_DEFINITIONS,
+  LIBRARY_SPELL_IDS,
+  MERCHANT_TRADE_COST,
+  MERCHANT_TRADE_REWARD,
+  OBSERVATORY_REVEAL_RADIUS,
+  SHRINE_EXPERIENCE,
+} from './landmarks';
 import { updateAllFog, updateFog } from './fog';
 import { getObjectAt, getTile, toTileIndex } from './map';
 import { findPath, getReachableTiles } from './pathfinding';
@@ -21,6 +40,7 @@ import { parseGameState, SAVE_KEY_PREFIX, serializeGameState } from './persisten
 import { gainExperience } from './progression';
 import { nextRandom } from './random';
 import { createInitialGameState, HUMAN_PLAYER_ID } from './scenario';
+import { getCombatSpell } from './spellbook';
 import type {
   ArmyStack,
   BattleResult,
@@ -32,6 +52,7 @@ import type {
   GameStoreOptions,
   HeroState,
   InteractionResult,
+  LandmarkObject,
   MapObject,
   MonsterObject,
   MovementResult,
@@ -72,6 +93,7 @@ export class GameStore {
   private state: GameState;
   private readonly listeners = new Set<StateListener>();
   private readonly storage: Storage | null;
+  private commandsSuspended = false;
 
   constructor(options: GameStoreOptions = {}) {
     this.state = createInitialGameState(options.seed);
@@ -81,6 +103,10 @@ export class GameStore {
 
   getState(): Readonly<GameState> {
     return this.state;
+  }
+
+  setCampaignCommandsSuspended(suspended: boolean): void {
+    this.commandsSuspended = suspended;
   }
 
   getHero(heroId: string): Readonly<HeroState> | undefined {
@@ -111,6 +137,7 @@ export class GameStore {
 
   private attempt<T>(action: () => T, notify = true): ActionResult<T> {
     try {
+      if (this.commandsSuspended) throw new Error('Campaign commands are suspended while the content editor is open');
       const value = action();
       if (notify) this.commit();
       return { ok: true, value };
@@ -159,6 +186,38 @@ export class GameStore {
     });
   }
 
+  equipArtifact(heroId: string, artifactId: string): ActionResult<HeroState> {
+    return this.attempt(() => {
+      this.assertPlaying();
+      if (this.state.pendingBattle) throw new Error('Resolve the pending battle before changing equipment');
+      const hero = this.requireHero(heroId);
+      const artifact = getArtifact(artifactId);
+      if (!artifact) throw new Error(`Unknown artifact: ${artifactId}`);
+      const inventory = equipInventoryArtifact(hero.artifacts, artifactId);
+      if (inventory === hero.artifacts && hero.artifacts.equipped[artifact.slot] !== artifactId) {
+        throw new Error(`${artifact.name} is not in ${hero.name}'s backpack`);
+      }
+      hero.artifacts = inventory;
+      synchronizeHeroMana(hero);
+      this.log('equipment', `${hero.name} equips ${artifact.name}.`);
+      return hero;
+    });
+  }
+
+  unequipArtifact(heroId: string, slot: string): ActionResult<HeroState> {
+    return this.attempt(() => {
+      this.assertPlaying();
+      if (this.state.pendingBattle) throw new Error('Resolve the pending battle before changing equipment');
+      const hero = this.requireHero(heroId);
+      const inventory = unequipInventoryArtifact(hero.artifacts, slot);
+      if (inventory === hero.artifacts) throw new Error(`No artifact is equipped in the ${slot} slot`);
+      hero.artifacts = inventory;
+      synchronizeHeroMana(hero);
+      this.log('equipment', `${hero.name} unequips the ${slot} artifact.`);
+      return hero;
+    });
+  }
+
   getReachableTiles(heroId = this.state.selectedHeroId ?? ''): ReachableTile[] {
     const hero = Object.hasOwn(this.state.heroes, heroId) ? this.state.heroes[heroId] : undefined;
     if (!hero || !hero.alive || this.state.pendingBattle || this.state.phase !== 'playing') return [];
@@ -182,6 +241,18 @@ export class GameStore {
     if (tile?.objectId === object.id) tile.objectId = null;
   }
 
+  private createBattleSide(hero: HeroState): BattleSetup['attacker'] {
+    return {
+      ownerId: hero.ownerId,
+      heroId: hero.id,
+      primarySkills: getEffectivePrimarySkills(hero),
+      army: cloneArmy(hero.army),
+      spells: [...hero.spells],
+      mana: Math.min(hero.mana, getHeroMaxMana(hero)),
+      maxMana: getHeroMaxMana(hero),
+    };
+  }
+
   private buildBattleSetup(hero: HeroState, object: MonsterObject | TownObject): BattleSetup {
     if (hero.position.x !== object.position.x || hero.position.y !== object.position.y) {
       throw new Error('Hero must be on the encounter tile');
@@ -191,12 +262,7 @@ export class GameStore {
         id: `battle:${hero.id}:${object.id}:${this.state.calendar.day}:${this.state.revision}`,
         seed: `${this.state.seed}:${this.state.rngState}:${hero.id}:${object.id}`,
         source: { heroId: hero.id, objectId: object.id, kind: 'monster' },
-        attacker: {
-          ownerId: hero.ownerId,
-          heroId: hero.id,
-          primarySkills: { ...hero.primarySkills },
-          army: cloneArmy(hero.army),
-        },
+        attacker: this.createBattleSide(hero),
         defender: {
           ownerId: 'neutral',
           heroId: null,
@@ -213,12 +279,7 @@ export class GameStore {
       id: `battle:${hero.id}:${object.id}:${this.state.calendar.day}:${this.state.revision}`,
       seed: `${this.state.seed}:${this.state.rngState}:${hero.id}:${object.id}`,
       source: { heroId: hero.id, objectId: object.id, kind: 'town' },
-      attacker: {
-        ownerId: hero.ownerId,
-        heroId: hero.id,
-        primarySkills: { ...hero.primarySkills },
-        army: cloneArmy(hero.army),
-      },
+      attacker: this.createBattleSide(hero),
       defender: {
         ownerId: town.ownerId,
         heroId: null,
@@ -239,6 +300,107 @@ export class GameStore {
     return setup;
   }
 
+  private interactWithLandmark(hero: HeroState, object: LandmarkObject, player: PlayerState): InteractionResult {
+    const definition = LANDMARK_DEFINITIONS[object.landmarkId];
+    const complete = (message: string, destination?: Point, resources?: ResourceCost): InteractionResult => {
+      object.visits[hero.id] = this.state.calendar.day;
+      this.log('landmark', message);
+      return {
+        kind: 'landmark',
+        landmarkId: object.landmarkId,
+        effect: definition.effect,
+        message,
+        ...(destination ? { destination } : {}),
+        ...(resources ? { resources } : {}),
+      };
+    };
+    if (isLandmarkUsed(object, hero.id, this.state.calendar.day)) {
+      const availability = definition.reuse === 'daily' ? 'already been used today' : 'already been visited';
+      return {
+        kind: 'landmark', landmarkId: object.landmarkId, effect: definition.effect,
+        message: `${object.name} has ${availability} by ${hero.name}.`,
+      };
+    }
+
+    if (object.landmarkId === 'arcaneLibrary') {
+      const spellId = LIBRARY_SPELL_IDS.find((id) => !hero.spells.includes(id));
+      if (!spellId) {
+        return {
+          kind: 'landmark', landmarkId: object.landmarkId, effect: 'spell',
+          message: `${hero.name} already knows every spell in ${object.name}.`,
+        };
+      }
+      hero.spells.push(spellId);
+      return complete(`${hero.name} learns ${getCombatSpell(spellId).name} at ${object.name}.`);
+    }
+    if (object.landmarkId === 'warriorsArena') {
+      hero.primarySkills.attack += 1;
+      return complete(`${hero.name} gains +1 attack at ${object.name}.`);
+    }
+    if (object.landmarkId === 'heroesShrine') {
+      gainExperience(hero, SHRINE_EXPERIENCE);
+      return complete(`${hero.name} gains ${SHRINE_EXPERIENCE} experience at ${object.name}.`);
+    }
+    if (object.landmarkId === 'huntersLodge') {
+      hero.primarySkills.defense += 1;
+      return complete(`${hero.name} gains +1 defense at ${object.name}.`);
+    }
+    if (object.landmarkId === 'waterwheel') {
+      hero.movementPoints = hero.maxMovementPoints;
+      return complete(`${hero.name}'s movement is fully restored at ${object.name}.`);
+    }
+    if (object.landmarkId === 'elementalForge') {
+      hero.primarySkills.attack += 1;
+      hero.primarySkills.defense += 1;
+      return complete(`${hero.name} gains +1 attack and +1 defense at ${object.name}.`);
+    }
+    if (object.landmarkId === 'ancientObservatory') {
+      const fog = this.state.fog[hero.ownerId];
+      if (!fog) throw new Error(`Unknown fog state: ${hero.ownerId}`);
+      const explored = new Set(fog.explored);
+      for (let y = object.position.y - OBSERVATORY_REVEAL_RADIUS; y <= object.position.y + OBSERVATORY_REVEAL_RADIUS; y += 1) {
+        for (let x = object.position.x - OBSERVATORY_REVEAL_RADIUS; x <= object.position.x + OBSERVATORY_REVEAL_RADIUS; x += 1) {
+          if (x < 0 || x >= this.state.map.width || y < 0 || y >= this.state.map.height ||
+            Math.hypot(object.position.x - x, object.position.y - y) > OBSERVATORY_REVEAL_RADIUS) continue;
+          explored.add(y * this.state.map.width + x);
+        }
+      }
+      const revealed = explored.size - fog.explored.length;
+      fog.explored = [...explored].sort((a, b) => a - b);
+      updateFog(this.state, hero.ownerId);
+      return complete(`${object.name} reveals ${revealed} new tiles for ${player.name}.`);
+    }
+    if (object.landmarkId === 'healersSanctuary') {
+      hero.mana = hero.maxMana;
+      return complete(`${hero.name}'s mana is fully restored at ${object.name}.`);
+    }
+    if (object.landmarkId === 'wayfarerPortal') {
+      const linked = object.linkedObjectId ? this.state.map.objects[object.linkedObjectId] : undefined;
+      if (!linked || linked.kind !== 'landmark' || linked.landmarkId !== 'wayfarerPortal' ||
+        linked.linkedObjectId !== object.id) throw new Error(`${object.name} is not linked to another portal`);
+      const occupied = Object.values(this.state.heroes).some((candidate) => candidate.id !== hero.id && candidate.alive &&
+        candidate.position.x === linked.position.x && candidate.position.y === linked.position.y);
+      if (occupied) {
+        return {
+          kind: 'landmark', landmarkId: object.landmarkId, effect: 'portal',
+          message: `${linked.name} is occupied. Portal travel is unavailable.`,
+        };
+      }
+      hero.position = { ...linked.position };
+      linked.visits[hero.id] = this.state.calendar.day;
+      updateFog(this.state, hero.ownerId);
+      return complete(`${hero.name} travels through ${object.name} to the linked portal.`, { ...linked.position });
+    }
+    if (!spendResources(player.resources, MERCHANT_TRADE_COST)) {
+      return {
+        kind: 'landmark', landmarkId: object.landmarkId, effect: 'trade',
+        message: `${object.name} requires 500 gold for 1 wood and 1 ore.`,
+      };
+    }
+    addResources(player.resources, MERCHANT_TRADE_REWARD);
+    return complete(`${hero.name} trades 500 gold for 1 wood and 1 ore at ${object.name}.`, undefined, { ...MERCHANT_TRADE_REWARD });
+  }
+
   private interactInternal(hero: HeroState): InteractionResult {
     const object = getObjectAt(this.state.map, hero.position);
     if (!object) return { kind: 'none', message: 'There is nothing to interact with here.' };
@@ -250,6 +412,17 @@ export class GameStore {
       gainExperience(hero, 50);
       this.log('pickup', `${hero.name} collects ${object.name}.`);
       return { kind: 'resource', message: `${object.name} collected.`, resources: { ...object.resources } };
+    }
+    if (object.kind === 'artifact') {
+      const artifact = getArtifact(object.artifactId);
+      if (!artifact) throw new Error(`Unknown artifact: ${object.artifactId}`);
+      const inventory = addArtifact(hero.artifacts, artifact.id);
+      if (inventory === hero.artifacts) throw new Error(`${artifact.name} cannot be added to the inventory`);
+      hero.artifacts = inventory;
+      this.removeObject(object);
+      gainExperience(hero, 100);
+      this.log('artifact', `${hero.name} collects ${artifact.name}.`);
+      return { kind: 'artifact', message: `${artifact.name} added to ${hero.name}'s backpack.`, artifactId: artifact.id };
     }
     if (object.kind === 'mine') {
       object.ownerId = hero.ownerId;
@@ -263,6 +436,7 @@ export class GameStore {
       const setup = this.initiateBattleInternal(hero, object);
       return { kind: 'battle', message: `Battle with ${object.name}.`, setup };
     }
+    if (object.kind === 'landmark') return this.interactWithLandmark(hero, object, player);
     const town = this.state.towns[object.townId];
     if (!town) throw new Error(`Unknown town: ${object.townId}`);
     if (town.ownerId !== hero.ownerId) {
@@ -349,10 +523,23 @@ export class GameStore {
     });
   }
 
+  private resolveTacticalBattle(setup: BattleSetup): BattleResult {
+    const result = runTacticalAutoBattle(setup).getResult();
+    if (!result) throw new Error('Tactical battle did not produce a result');
+    return result;
+  }
+
   private validateBattleResult(result: BattleResult, setup: BattleSetup): void {
     if (result.setupId !== setup.id) throw new Error('Battle result does not match the pending setup');
     if (!['attacker', 'defender', 'draw'].includes(result.winner)) throw new Error('Invalid battle winner');
     if (!Number.isInteger(result.rounds) || result.rounds < 0) throw new Error('Invalid battle round count');
+    for (const side of ['attacker', 'defender'] as const) {
+      const mana = side === 'attacker' ? result.attackerMana : result.defenderMana;
+      const maximum = setup[side].maxMana ?? setup[side].primarySkills.knowledge * 10;
+      if (mana !== undefined && (!Number.isSafeInteger(mana) || mana < 0 || mana > maximum)) {
+        throw new Error(`Invalid ${side} mana result`);
+      }
+    }
     if (!isSurvivingArmy(setup.attacker.army, result.attackerArmy)) throw new Error('Invalid attacking survivors');
     if (!isSurvivingArmy(setup.defender.army, result.defenderArmy)) throw new Error('Invalid defending survivors');
     const attackersRemain = armySize(result.attackerArmy) > 0;
@@ -384,6 +571,9 @@ export class GameStore {
 
     hero.army = result.winner === 'defender' ? [] : cloneArmy(result.attackerArmy);
     hero.alive = armySize(hero.army) > 0;
+    if (result.attackerMana !== undefined) hero.mana = result.attackerMana;
+    const defendingHero = this.state.heroes[setup.defender.heroId ?? ''];
+    if (defendingHero && result.defenderMana !== undefined) defendingHero.mana = result.defenderMana;
     if (object.kind === 'monster') {
       if (result.winner === 'attacker' || armySize(result.defenderArmy) === 0) this.removeObject(object);
       else object.army = cloneArmy(result.defenderArmy);
@@ -428,7 +618,7 @@ export class GameStore {
   resolveBattleAutomatically(): ActionResult<BattleResult> {
     return this.attempt(() => {
       if (!this.state.pendingBattle) throw new Error('There is no pending battle');
-      return this.applyBattleResultInternal(resolveBattleAutomatically(this.state.pendingBattle));
+      return this.applyBattleResultInternal(this.resolveTacticalBattle(this.state.pendingBattle));
     });
   }
 
@@ -595,12 +785,13 @@ export class GameStore {
     for (const hero of Object.values(this.state.heroes)) {
       if (hero.ownerId !== playerId || !hero.alive) continue;
       hero.movementPoints = hero.maxMovementPoints;
+      synchronizeHeroMana(hero);
       hero.mana = hero.maxMana;
     }
   }
 
   private aiTargetScore(object: MapObject): number {
-    if (object.kind === 'resource') return 0;
+    if (object.kind === 'resource' || object.kind === 'artifact') return 0;
     if (object.kind === 'mine') return 1;
     if (object.kind === 'monster') return 2;
     if (object.kind === 'dwelling') return 3;
@@ -613,13 +804,13 @@ export class GameStore {
     for (const hero of heroes) {
       for (let move = 0; move < 4 && hero.alive && this.state.phase === 'playing'; move += 1) {
         if (this.state.pendingBattle) {
-          this.applyBattleResultInternal(resolveBattleAutomatically(this.state.pendingBattle));
+          this.applyBattleResultInternal(this.resolveTacticalBattle(this.state.pendingBattle));
           continue;
         }
         const reachable = this.getReachableTiles(hero.id);
         const reachableByIndex = new Map(reachable.map((tile) => [tile.tileIndex, tile]));
         const targets = Object.values(this.state.map.objects).filter((object) => {
-          if (object.kind === 'resource') return true;
+          if (object.kind === 'resource' || object.kind === 'artifact') return true;
           if (object.kind === 'mine') return object.ownerId !== playerId;
           if (object.kind === 'dwelling') return object.available > 0;
           if (object.kind === 'monster') return armyPower(hero.army) >= armyPower(object.army) * 0.75;
@@ -658,7 +849,7 @@ export class GameStore {
             }
           }
         }
-        if (this.state.pendingBattle) this.applyBattleResultInternal(resolveBattleAutomatically(this.state.pendingBattle));
+        if (this.state.pendingBattle) this.applyBattleResultInternal(this.resolveTacticalBattle(this.state.pendingBattle));
       }
     }
     return this.state.log.slice(firstLogEntry);
@@ -725,12 +916,16 @@ export class GameStore {
   }
 
   newGame(seed = this.state.seed): ActionResult<Readonly<GameState>> {
-    this.state = createInitialGameState(seed);
-    this.commit();
-    return { ok: true, value: this.state };
+    return this.attempt(() => {
+      this.state = createInitialGameState(seed);
+      return this.state;
+    });
   }
 
   saveGame(slot = 'autosave'): ActionResult<string> {
+    if (this.commandsSuspended) {
+      return { ok: false, error: 'Campaign commands are suspended while the content editor is open' };
+    }
     if (!this.storage) return { ok: false, error: 'Local storage is unavailable' };
     if (!/^[\w-]+$/.test(slot)) return { ok: false, error: 'Invalid save slot' };
     try {

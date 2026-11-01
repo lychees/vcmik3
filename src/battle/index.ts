@@ -1,4 +1,5 @@
 export { BattleView } from './BattleView';
+export type { BattleViewOptions } from './BattleView';
 export { BattleEngine } from './BattleEngine';
 export { chooseAiAction, chooseAiSpell, performAiTurn, runTacticalAutoBattle } from './BattleAI';
 export type {

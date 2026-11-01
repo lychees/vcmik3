@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { getCreature, getTerrain } from '../game/content';
+import { isLandmarkUsed, LANDMARK_DEFINITIONS } from '../game/landmarks';
 import type { GameStore } from '../game/GameStore';
 import type {
   AdventureMap as AdventureMapData,
@@ -134,6 +135,7 @@ function objectSignature(object: MapObject, state: Readonly<GameState>): string 
   return JSON.stringify([
     object,
     object.kind === 'town' ? state.towns[object.townId] : null,
+    object.kind === 'landmark' ? [state.selectedHeroId, state.calendar.day] : null,
   ]);
 }
 
@@ -878,6 +880,19 @@ export class AdventureMap {
       } else if (object.kind === 'monster') {
         addLine(describeArmy(object.army));
         addLine(`Treasure: ${formatResources(object.treasure)}`, true);
+      } else if (object.kind === 'artifact') {
+        addLine('Artifact · collect to add it to the visiting hero’s backpack');
+        addLine('Equip it from the hero panel to apply its primary-stat bonuses', true);
+      } else if (object.kind === 'landmark') {
+        const definition = LANDMARK_DEFINITIONS[object.landmarkId];
+        addLine(definition.description);
+        const heroId = this.store.getSelectedHero()?.id ?? '';
+        const used = isLandmarkUsed(object, heroId, this.state.calendar.day);
+        addLine(used ? 'Visited · effect unavailable' : definition.reuse === 'daily' ? 'Available once per day' : 'Ready to visit', true);
+        if (object.linkedObjectId) {
+          const linked = this.state.map.objects[object.linkedObjectId];
+          if (linked) addLine(`Linked to ${linked.name} at ${linked.position.x + 1}, ${linked.position.y + 1}`, true);
+        }
       } else {
         const town = this.state.towns[object.townId];
         addLine(`${town?.faction ?? 'Town'} · ${town ? this.state.players[town.ownerId]?.name ?? town.ownerId : 'Unknown owner'}`);

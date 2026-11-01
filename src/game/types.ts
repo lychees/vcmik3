@@ -1,12 +1,7 @@
-export type ResourceType =
-  | 'gold'
-  | 'wood'
-  | 'ore'
-  | 'crystal'
-  | 'gems'
-  | 'mercury'
-  | 'sulfur';
+import type { ArtifactInventory } from './artifacts';
+import type { ExtendedResourceType } from './resources';
 
+export type ResourceType = ExtendedResourceType;
 export type ResourceBundle = Record<ResourceType, number>;
 export type ResourceCost = Partial<Record<ResourceType, number>>;
 
@@ -102,6 +97,7 @@ export interface HeroState {
   maxMovementPoints: number;
   army: ArmyStack[];
   spells: string[];
+  artifacts: ArtifactInventory;
   alive: boolean;
 }
 
@@ -151,6 +147,11 @@ export interface ResourceObject extends MapObjectBase {
   resources: ResourceCost;
 }
 
+export interface ArtifactObject extends MapObjectBase {
+  kind: 'artifact';
+  artifactId: string;
+}
+
 export interface MineObject extends MapObjectBase {
   kind: 'mine';
   ownerId: string | null;
@@ -171,6 +172,38 @@ export interface MonsterObject extends MapObjectBase {
   treasure: ResourceCost;
 }
 
+export type LandmarkType =
+  | 'arcaneLibrary'
+  | 'warriorsArena'
+  | 'heroesShrine'
+  | 'huntersLodge'
+  | 'waterwheel'
+  | 'elementalForge'
+  | 'ancientObservatory'
+  | 'healersSanctuary'
+  | 'wayfarerPortal'
+  | 'merchantsTent';
+
+export type LandmarkEffect =
+  | 'spell'
+  | 'experience'
+  | 'attack'
+  | 'defense'
+  | 'movement'
+  | 'forge'
+  | 'reveal'
+  | 'mana'
+  | 'portal'
+  | 'trade';
+
+export interface LandmarkObject extends MapObjectBase {
+  kind: 'landmark';
+  landmarkId: LandmarkType;
+  visits: Record<string, number>;
+  depleted: boolean;
+  linkedObjectId: string | null;
+}
+
 export interface TownObject extends MapObjectBase {
   kind: 'town';
   townId: string;
@@ -178,9 +211,11 @@ export interface TownObject extends MapObjectBase {
 
 export type MapObject =
   | ResourceObject
+  | ArtifactObject
   | MineObject
   | DwellingObject
   | MonsterObject
+  | LandmarkObject
   | TownObject;
 
 export interface MapTile {
@@ -230,6 +265,9 @@ export interface BattleSide {
   heroId: string | null;
   primarySkills: PrimarySkills;
   army: ArmyStack[];
+  spells?: string[];
+  mana?: number;
+  maxMana?: number;
 }
 
 export interface BattleSetup {
@@ -252,6 +290,8 @@ export interface BattleResult {
   defenderArmy: ArmyStack[];
   rewards: BattleRewards;
   rounds: number;
+  attackerMana?: number;
+  defenderMana?: number;
 }
 
 export interface GameEvent {
@@ -298,8 +338,10 @@ export interface PathfindingOptions {
 export type InteractionResult =
   | { kind: 'none'; message: string }
   | { kind: 'resource'; message: string; resources: ResourceCost }
+  | { kind: 'artifact'; message: string; artifactId: string }
   | { kind: 'mine'; message: string; ownerId: string }
   | { kind: 'dwelling'; message: string; dwellingId: string }
+  | { kind: 'landmark'; message: string; landmarkId: LandmarkType; effect: LandmarkEffect; destination?: Point; resources?: ResourceCost }
   | { kind: 'town'; message: string; townId: string }
   | { kind: 'battle'; message: string; setup: BattleSetup };
 

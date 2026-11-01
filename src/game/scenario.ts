@@ -1,7 +1,9 @@
+import { createArtifactInventory } from './artifacts';
 import { getCreature, getFaction, getHeroDefinition, startingResources } from './content';
 import { updateAllFog } from './fog';
 import { createAdventureMap } from './map';
 import { hashSeed } from './random';
+import { createDefaultSpellbook } from './spellbook';
 import type { GameState, HeroDefinition, HeroState, Point, TownState } from './types';
 
 export const HUMAN_PLAYER_ID = 'red';
@@ -28,7 +30,8 @@ export function createHeroState(
     movementPoints: 1500,
     maxMovementPoints: 1500,
     army: definition.startingArmy.map((stack) => ({ ...stack })),
-    spells: [...definition.spells],
+    spells: createDefaultSpellbook(),
+    artifacts: createArtifactInventory(),
     alive: true,
   };
 }

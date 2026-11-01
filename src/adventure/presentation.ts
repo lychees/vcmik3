@@ -1,7 +1,9 @@
 import { getCreature } from '../game/content';
+import { hasVisitedLandmark, isLandmarkUsed } from '../game/landmarks';
 import type {
   GameState,
   HeroState,
+  LandmarkType,
   MapObject,
   Point,
   ReachableTile,
@@ -83,6 +85,8 @@ export interface AdventureObjectSnapshot {
   ownerId: string | null;
   visible: boolean;
   explored: boolean;
+  landmarkId: LandmarkType | null;
+  visited: boolean;
   depleted: boolean;
 }
 
@@ -155,7 +159,10 @@ export function createMapSnapshot(
       ownerId,
       visible: visible.has(tileIndex),
       explored: explored.has(tileIndex),
-      depleted: object.kind === 'dwelling' && object.available <= 0,
+      landmarkId: object.kind === 'landmark' ? object.landmarkId : null,
+      visited: object.kind === 'landmark' && hasVisitedLandmark(object, state.selectedHeroId ?? ''),
+      depleted: (object.kind === 'dwelling' && object.available <= 0) ||
+        (object.kind === 'landmark' && isLandmarkUsed(object, state.selectedHeroId ?? '', state.calendar.day)),
     };
   });
 

@@ -7,7 +7,7 @@ import { FACTION_VISUALS, getFactionVisual, ROSTER_COUNTS } from './presentation
 
 describe('complete faction presentation', () => {
   it('provides a distinct crest, palette, and town banner for every faction', () => {
-    expect(ROSTER_COUNTS).toEqual({ factions: 13, units: 52, tiers: 4 });
+    expect(ROSTER_COUNTS).toEqual({ factions: 13, units: 72, tiers: 4 });
     expect(Object.keys(FACTION_VISUALS)).toHaveLength(13);
     expect(new Set(Object.values(FACTIONS).map((faction) => factionIcon(faction.name))).size).toBe(13);
     expect(new Set(Object.values(FACTIONS).map((faction) => townBanner(faction.name))).size).toBe(13);
@@ -23,7 +23,7 @@ describe('complete faction presentation', () => {
 
   it('renders every unit as a labeled faction and four-tier portrait without duplicate markup', () => {
     const portraits = Object.values(CREATURES).map((creature) => creaturePortrait(creature.id));
-    expect(new Set(portraits).size).toBe(52);
+    expect(new Set(portraits).size).toBe(72);
     for (const faction of Object.values(FACTIONS)) {
       const portraitsByTier = faction.creatureIds.map((id) => creaturePortrait(id));
       expect(portraitsByTier.map((portrait) => Number(/data-tier="(\d)"/.exec(portrait)?.[1]))).toEqual([1, 2, 3, 4]);
